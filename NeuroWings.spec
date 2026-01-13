@@ -19,13 +19,46 @@ datas = []
 
 # Собираем все DLL библиотеки PyTorch (КРИТИЧНО!)
 binaries = []
+datas_torch = []
+
 try:
-    # Собираем все динамические библиотеки torch, torchvision, cv2
+    import torch
+    import torchvision
+    import cv2
+
+    # Находим пути к библиотекам
+    torch_path = os.path.dirname(torch.__file__)
+    torchvision_path = os.path.dirname(torchvision.__file__)
+    cv2_path = os.path.dirname(cv2.__file__)
+
+    print(f"PyInstaller: Collecting torch from {torch_path}")
+    print(f"PyInstaller: Collecting torchvision from {torchvision_path}")
+    print(f"PyInstaller: Collecting cv2 from {cv2_path}")
+
+    # Собираем динамические библиотеки
     binaries += collect_dynamic_libs('torch')
     binaries += collect_dynamic_libs('torchvision')
     binaries += collect_dynamic_libs('cv2')
+
+    # ВАЖНО: Собираем ВСЕ файлы из torch/lib (включая .dll на Windows)
+    torch_lib = os.path.join(torch_path, 'lib')
+    if os.path.exists(torch_lib):
+        for file in os.listdir(torch_lib):
+            if file.endswith(('.dll', '.so', '.dylib', '.pyd')):
+                src = os.path.join(torch_lib, file)
+                binaries.append((src, 'torch/lib'))
+                print(f"  Added: {file}")
+
+    # Также собираем данные PyTorch (могут быть конфиги)
+    datas_torch += collect_data_files('torch', include_py_files=False)
+
 except Exception as e:
-    print(f"Warning: Failed to collect some dynamic libs: {e}")
+    print(f"Warning: Failed to collect torch libs: {e}")
+    import traceback
+    traceback.print_exc()
+
+# Объединяем данные
+datas += datas_torch
 
 a = Analysis(
     ['run.py'],
