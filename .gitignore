@@ -1,0 +1,71 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual Environment
+venv/
+env/
+ENV/
+.venv
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+neurowings.log
+
+# PyQt
+*.ui.py
+
+# Project specific
+models/*.pt
+models/*.pth
+!models/.gitkeep
+
+# Data files
+*.tps
+*.csv
+*.xlsx
+*.xlsm
+
+# Images (опционально - раскомментируйте если не хотите включать в git)
+# *.jpg
+# *.jpeg
+# *.png
+# *.bmp
+# *.tif
+# *.tiff
+
+# Временные файлы
+*.tmp
+*.bak
+*.swp
+.cache/
+
+# OS
+Thumbs.db
+.DS_Store
