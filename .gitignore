@@ -69,3 +69,14 @@ models/*.pth
 # OS
 Thumbs.db
 .DS_Store
+
+# Portable Bundle build artifacts
+build_portable/
+dist_portable/
+python-*-embed-amd64.zip
+get-pip.py
+
+# PyInstaller artifacts (old, но может пригодиться для экспериментов)
+*.spec.bak
+build/
+dist/

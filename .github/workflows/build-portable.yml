@@ -1,0 +1,84 @@
+name: Build Portable Windows Bundle
+
+on:
+  # Только ручной запуск
+  workflow_dispatch:
+  # Или при создании release tag
+  push:
+    tags:
+      - 'v*.*.*'
+
+jobs:
+  build-portable:
+    runs-on: windows-latest
+
+    steps:
+    - name: Checkout code
+      uses: actions/checkout@v4
+
+    - name: Set up Python
+      uses: actions/setup-python@v5
+      with:
+        python-version: '3.11'
+
+    - name: Install build dependencies
+      run: |
+        python -m pip install --upgrade pip
+        pip install -r requirements.txt
+      shell: cmd
+
+    - name: Build portable bundle
+      run: |
+        python build_portable.py
+      shell: cmd
+
+    - name: Upload portable folder artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: NeuroWings-Portable-Folder
+        path: dist_portable/NeuroWings/
+        retention-days: 30
+
+    - name: Upload portable ZIP artifact
+      uses: actions/upload-artifact@v4
+      with:
+        name: NeuroWings-Portable-ZIP
+        path: dist_portable/NeuroWings-Portable-Windows.zip
+        retention-days: 30
+
+    - name: Create Release (on tag)
+      if: startsWith(github.ref, 'refs/tags/')
+      uses: softprops/action-gh-release@v1
+      with:
+        files: |
+          dist_portable/NeuroWings-Portable-Windows.zip
+        body: |
+          # NeuroWings Portable Release
+
+          ## Что нового в этой версии
+
+          См. CHANGELOG.md
+
+          ## Установка и запуск
+
+          1. Скачайте `NeuroWings-Portable-Windows.zip`
+          2. Распакуйте архив в любую папку
+          3. Запустите `NeuroWings.bat`
+
+          ## Требования
+
+          - Windows 10/11 (64-bit)
+          - Visual C++ Redistributable 2015-2022 (обычно уже установлен)
+            Если приложение не запускается, установите: https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+          ## Поддержка
+
+          При возникновении проблем:
+          1. Проверьте файл `neurowings.log` в папке приложения
+          2. Создайте issue в репозитории с описанием проблемы
+
+          ## Размер
+
+          ~500 MB (включает Python + PyTorch + все зависимости)
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
