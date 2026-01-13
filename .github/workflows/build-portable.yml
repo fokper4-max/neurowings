@@ -29,14 +29,14 @@ jobs:
     - name: Upload portable folder artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NeuroWings-Portable-Folder
+        name: NeuroWings-Portable-v2-Folder
         path: dist_portable/NeuroWings/
         retention-days: 30
 
     - name: Upload portable ZIP artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NeuroWings-Portable-ZIP
+        name: NeuroWings-Portable-v2-ZIP-FIXED-DLL
         path: dist_portable/NeuroWings-Portable-Windows.zip
         retention-days: 30
 
