@@ -2,11 +2,17 @@
 
 Neural Network-based Wing Analysis Tool
 
-## Installation
+## Installation (Windows)
 
-### For Users
+### Portable Version (WinPython) - RECOMMENDED
 
-Download from [Releases](https://github.com/fokper4-max/neurowings/releases)
+**Works on Windows 7/8/10/11!**
+
+1. Download `NeuroWings-WinPython-Portable.zip` from [Releases](https://github.com/fokper4-max/neurowings/releases)
+2. Extract to any folder
+3. Follow instructions in `INSTALL.txt`
+
+This method is 100% reliable and works on all Windows versions.
 
 ### For Developers
 
@@ -18,5 +24,9 @@ python run.py
 ## Build
 
 ```bash
+# WinPython portable (recommended)
+python build_winpython.py
+
+# Embedded Python portable (may have DLL issues)
 python build_portable.py
 ```
