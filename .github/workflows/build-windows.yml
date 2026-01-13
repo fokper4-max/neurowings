@@ -1,10 +1,11 @@
 name: Build Windows EXE
 
 on:
-  push:
-    branches: [ main, master ]
-  pull_request:
-    branches: [ main, master ]
+  # Отключаем автосборку при каждом push - только вручную
+  # push:
+  #   branches: [ main, master ]
+  # pull_request:
+  #   branches: [ main, master ]
   workflow_dispatch:  # Позволяет запустить вручную из GitHub UI
 
 jobs:
@@ -19,6 +20,11 @@ jobs:
       uses: actions/setup-python@v5
       with:
         python-version: '3.11'
+
+    - name: Install Visual C++ Redistributable
+      run: |
+        choco install vcredist-all -y
+      shell: cmd
 
     - name: Install dependencies
       run: |
