@@ -1,4 +1,4 @@
-name: Build Portable Windows Bundle
+name: Build Portable v2 (DLL Fix)
 
 on:
   # Только ручной запуск
