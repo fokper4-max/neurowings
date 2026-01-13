@@ -382,7 +382,10 @@ def build_portable() -> None:
 
     # 5. Установить зависимости
     log("Step 5: Installing dependencies")
-    requirements_file = Path(__file__).parent / "requirements.txt"
+    # Используем requirements-portable.txt если существует, иначе requirements.txt
+    requirements_portable = Path(__file__).parent / "requirements-portable.txt"
+    requirements_file = requirements_portable if requirements_portable.exists() else Path(__file__).parent / "requirements.txt"
+    log(f"Using requirements file: {requirements_file.name}")
     install_dependencies(python_dir, requirements_file)
 
     # 6. Копировать проект
