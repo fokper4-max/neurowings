@@ -110,26 +110,38 @@ def setup_python(python_dir: Path) -> None:
 def install_dependencies(python_dir: Path, requirements_file: Path) -> None:
     """Установить зависимости из requirements.txt"""
     python_exe = python_dir / "python.exe"
-    pip_exe = python_dir / "Scripts" / "pip.exe"
 
     log(f"Installing dependencies from {requirements_file}")
 
-    # Используем pip напрямую
+    # Используем pip напрямую с verbose выводом
     cmd = [
         str(python_exe),
         "-m", "pip",
         "install",
         "--no-warn-script-location",
+        "--verbose",  # Добавляем verbose для отладки
         "-r", str(requirements_file)
     ]
 
     log(f"Running: {' '.join(cmd)}")
+    log("This may take 5-10 minutes for PyTorch installation...")
+
+    # Запускаем без capture_output чтобы видеть весь процесс
     result = subprocess.run(cmd, cwd=python_dir)
 
     if result.returncode != 0:
         raise RuntimeError(f"Failed to install dependencies (exit code: {result.returncode})")
 
     log("Dependencies installed successfully")
+
+    # Проверяем что PyTorch установился корректно
+    log("Verifying PyTorch installation...")
+    verify_cmd = [str(python_exe), "-c", "import torch; print(f'PyTorch {torch.__version__} installed at {torch.__file__}')"]
+    verify_result = subprocess.run(verify_cmd, capture_output=True, text=True)
+    if verify_result.returncode == 0:
+        log(f"PyTorch verification: {verify_result.stdout.strip()}")
+    else:
+        log(f"WARNING: PyTorch verification failed: {verify_result.stderr}")
 
 
 def copy_project_files(dest_dir: Path) -> None:
