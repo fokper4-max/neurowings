@@ -201,6 +201,14 @@ if not exist "python.exe" (
     exit /b 1
 )
 
+REM CRITICAL: Add PyTorch DLL paths to system PATH
+REM This fixes "DLL load failed" errors
+set "PATH=%SCRIPT_DIR%Lib\\site-packages\\torch\\lib;%PATH%"
+set "PATH=%SCRIPT_DIR%Lib\\site-packages\\torchvision;%PATH%"
+
+REM Set Python to find DLLs
+set "PYTHONPATH=%SCRIPT_DIR%"
+
 REM Run application
 echo Starting {APP_NAME}...
 python.exe run.py %*

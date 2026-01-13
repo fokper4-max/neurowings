@@ -1,12 +1,11 @@
-# Requirements for Portable Bundle
-# Using specific versions for stability
+# Requirements for Portable Bundle (~400 MB total)
 
 PyQt5==5.15.10
 numpy==1.26.4
-opencv-python==4.9.0.80
+opencv-python-headless==4.9.0.80
 psutil==5.9.8
 
-# PyTorch CPU-only (smaller and more compatible)
---index-url https://download.pytorch.org/whl/cpu
-torch==2.2.0+cpu
-torchvision==0.17.0+cpu
+# PyTorch CPU-only 2.0 (smaller than 2.2)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.0.1+cpu
+torchvision==0.15.2+cpu

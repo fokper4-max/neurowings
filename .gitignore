@@ -73,6 +73,8 @@ Thumbs.db
 # Portable Bundle build artifacts
 build_portable/
 dist_portable/
+build_winpython/
+dist_winpython/
 python-*-embed-amd64.zip
 get-pip.py
 
