@@ -16,6 +16,17 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
+    - name: Download neural network models
+      run: |
+        echo Downloading models from GitHub Release...
+        curl -L -o models.tar.gz https://github.com/fokper4-max/neurowings/releases/download/models-v1.0/models.tar.gz
+        echo Extracting models...
+        mkdir models
+        tar -xzf models.tar.gz -C models/
+        echo Models downloaded successfully!
+        ls -lh models/
+      shell: bash
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:

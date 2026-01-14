@@ -170,6 +170,18 @@ def copy_project_files(dest_dir: Path) -> None:
     shutil.copy2(run_src, run_dst)
     log(f"Copied {run_src} -> {run_dst}")
 
+    # Копируем models/ (нейросетевые модели)
+    models_src = source_dir / "models"
+    models_dst = dest_dir / "models"
+    if models_src.exists() and any(models_src.iterdir()):
+        if models_dst.exists():
+            shutil.rmtree(models_dst)
+        shutil.copytree(models_src, models_dst)
+        total_size = sum(f.stat().st_size for f in models_dst.rglob('*') if f.is_file())
+        log(f"Copied {models_src} -> {models_dst} ({total_size / (1024*1024):.1f} MB)")
+    else:
+        log(f"WARNING: models/ folder not found or empty - app will show 'models not found' error")
+
     # Копируем requirements.txt для справки
     req_src = source_dir / "requirements.txt"
     req_dst = dest_dir / "requirements.txt"
