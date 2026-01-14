@@ -1,4 +1,4 @@
-name: Build Portable v2 (DLL Fix)
+name: Build Portable v3 (Models + External Launcher)
 
 on:
   # Только ручной запуск
@@ -40,14 +40,14 @@ jobs:
     - name: Upload portable folder artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NeuroWings-Portable-v2-Folder
-        path: dist_portable/NeuroWings/
+        name: NeuroWings-Portable-v3-Folder
+        path: dist_portable/NeuroWings-Portable/
         retention-days: 30
 
     - name: Upload portable ZIP artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NeuroWings-Portable-v2-ZIP-FIXED-DLL
+        name: NeuroWings-Portable-v3-ZIP
         path: dist_portable/NeuroWings-Portable-Windows.zip
         retention-days: 30
 
@@ -68,7 +68,25 @@ jobs:
 
           1. Скачайте `NeuroWings-Portable-Windows.zip`
           2. Распакуйте архив в любую папку
-          3. Запустите `NeuroWings.bat`
+          3. Запустите `NeuroWings.bat` (находится СНАРУЖИ папки NeuroWings)
+
+          **Модели нейросетей уже включены в архив!**
+
+          **Структура после распаковки:**
+          ```
+          NeuroWings-Portable/
+          ├── NeuroWings.bat       ← Запускать здесь!
+          ├── README.txt
+          └── NeuroWings/
+              ├── python.exe
+              ├── neurowings/
+              ├── models/          ← Модели сюда
+              │   ├── yolo_detect_best.pt
+              │   ├── yolo_pose_best.pt
+              │   ├── stage2_best.pth
+              │   └── best.pt
+              └── run.py
+          ```
 
           ## Требования
 
@@ -79,11 +97,12 @@ jobs:
           ## Поддержка
 
           При возникновении проблем:
-          1. Проверьте файл `neurowings.log` в папке приложения
-          2. Создайте issue в репозитории с описанием проблемы
+          1. Проверьте файл `NeuroWings/neurowings.log`
+          2. Убедитесь что папка `NeuroWings/models/` содержит 4 файла моделей
+          3. Создайте issue в репозитории с описанием проблемы
 
           ## Размер
 
-          ~500 MB (включает Python + PyTorch + все зависимости)
+          ~600 MB (включает Python + PyTorch + модели нейросетей)
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
