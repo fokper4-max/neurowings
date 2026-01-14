@@ -170,17 +170,23 @@ def copy_project_files(dest_dir: Path) -> None:
     shutil.copy2(run_src, run_dst)
     log(f"Copied {run_src} -> {run_dst}")
 
-    # Копируем models/ (нейросетевые модели)
+    # КРИТИЧНО: Копируем папку models/ с файлами моделей
     models_src = source_dir / "models"
     models_dst = dest_dir / "models"
-    if models_src.exists() and any(models_src.iterdir()):
+    if models_src.exists():
         if models_dst.exists():
             shutil.rmtree(models_dst)
-        shutil.copytree(models_src, models_dst)
+        shutil.copytree(
+            models_src,
+            models_dst,
+            ignore=shutil.ignore_patterns('__pycache__', '.DS_Store')
+        )
+        # Подсчитываем размер моделей
         total_size = sum(f.stat().st_size for f in models_dst.rglob('*') if f.is_file())
         log(f"Copied {models_src} -> {models_dst} ({total_size / (1024*1024):.1f} MB)")
     else:
-        log(f"WARNING: models/ folder not found or empty - app will show 'models not found' error")
+        log(f"WARNING: models/ folder not found at {models_src}")
+        log("The application will not work without model files!")
 
     # Копируем requirements.txt для справки
     req_src = source_dir / "requirements.txt"
@@ -189,13 +195,64 @@ def copy_project_files(dest_dir: Path) -> None:
         shutil.copy2(req_src, req_dst)
 
 
-def create_launchers(dest_dir: Path) -> None:
-    """Создать launcher скрипты"""
+def create_launchers(dest_dir: Path, create_external: bool = False) -> None:
+    """
+    Создать launcher скрипты
+
+    Args:
+        dest_dir: Директория для launcher'ов (если create_external=False - внутри NeuroWings/)
+        create_external: Если True, создать launcher снаружи папки NeuroWings
+    """
     log("Creating launcher scripts")
 
-    # Windows Batch launcher
-    batch_launcher = dest_dir / f"{APP_NAME}.bat"
-    batch_content = f'''@echo off
+    if create_external:
+        # Launcher снаружи (dest_dir - это родительская папка, содержащая NeuroWings/)
+        app_folder = "NeuroWings"
+        batch_launcher = dest_dir / f"{APP_NAME}.bat"
+        batch_content = f'''@echo off
+REM NeuroWings Portable Launcher
+REM This launcher runs the application using embedded Python
+
+setlocal
+
+REM Get script directory (where this .bat file is located)
+set "SCRIPT_DIR=%~dp0"
+cd /d "%SCRIPT_DIR%{app_folder}"
+
+REM Check if Python exists
+if not exist "python.exe" (
+    echo ERROR: python.exe not found in {app_folder} folder!
+    echo Please make sure you extracted the complete {APP_NAME} archive.
+    pause
+    exit /b 1
+)
+
+REM CRITICAL: Add PyTorch DLL paths to system PATH
+REM This fixes "DLL load failed" errors
+set "PATH=%SCRIPT_DIR%{app_folder}\\Lib\\site-packages\\torch\\lib;%PATH%"
+set "PATH=%SCRIPT_DIR%{app_folder}\\Lib\\site-packages\\torchvision;%PATH%"
+
+REM Set Python to find DLLs
+set "PYTHONPATH=%SCRIPT_DIR%{app_folder}"
+
+REM Run application
+echo Starting {APP_NAME}...
+python.exe run.py %*
+
+REM If application crashed, keep window open
+if errorlevel 1 (
+    echo.
+    echo {APP_NAME} exited with error code %errorlevel%
+    echo Check {app_folder}\\neurowings.log for details.
+    pause
+)
+
+endlocal
+'''
+    else:
+        # Launcher внутри (старый вариант)
+        batch_launcher = dest_dir / f"{APP_NAME}.bat"
+        batch_content = f'''@echo off
 REM NeuroWings Portable Launcher
 REM This launcher runs the application using embedded Python
 
@@ -238,41 +295,86 @@ endlocal
     batch_launcher.write_text(batch_content, encoding='utf-8')
     log(f"Created {batch_launcher}")
 
-    # PowerShell launcher (более современный)
-    ps_launcher = dest_dir / f"{APP_NAME}.ps1"
-    ps_content = f'''# NeuroWings Portable Launcher (PowerShell)
-# This launcher runs the application using embedded Python
-
-$ErrorActionPreference = "Stop"
-$ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
-Set-Location $ScriptDir
-
-# Check if Python exists
-if (-not (Test-Path "python.exe")) {{
-    Write-Host "ERROR: python.exe not found!" -ForegroundColor Red
-    Write-Host "Please make sure you extracted the complete {APP_NAME} archive."
-    Read-Host "Press Enter to exit"
-    exit 1
-}}
-
-# Run application
-Write-Host "Starting {APP_NAME}..." -ForegroundColor Green
-& .\\python.exe run.py $args
-
-# Check exit code
-if ($LASTEXITCODE -ne 0) {{
-    Write-Host ""
-    Write-Host "{APP_NAME} exited with error code $LASTEXITCODE" -ForegroundColor Yellow
-    Write-Host "Check neurowings.log for details."
-    Read-Host "Press Enter to exit"
-}}
-'''
-    ps_launcher.write_text(ps_content, encoding='utf-8')
-    log(f"Created {ps_launcher}")
+    # PowerShell launcher (более современный) - НЕ используем, т.к. bat проще
+    # Оставляем только README
 
     # README для пользователей
     readme = dest_dir / "README.txt"
-    readme_content = f'''{APP_NAME} - Portable Version
+    if create_external:
+        # README снаружи
+        readme_content = f'''{APP_NAME} - Portable Version
+{"=" * 60}
+
+This is a portable (standalone) version of {APP_NAME}.
+It includes its own Python interpreter and all dependencies.
+No installation required!
+
+HOW TO RUN:
+-----------
+1. Extract this entire archive to any location
+2. Double-click "{APP_NAME}.bat" to start the application
+
+REQUIREMENTS:
+------------
+- Windows 10/11 (64-bit)
+- Visual C++ Redistributable 2015-2022
+  (usually already installed)
+
+  If the application fails to start, download and install:
+  https://aka.ms/vs/17/release/vc_redist.x64.exe
+
+TROUBLESHOOTING:
+---------------
+1. If nothing happens when you run the launcher:
+   - Check "{app_folder}\\neurowings.log" file for errors
+   - Make sure you extracted ALL files from the archive
+   - Make sure both {APP_NAME}.bat and {app_folder}/ are in the same folder
+
+2. If you see "Models not found" error:
+   - Make sure {app_folder}\\models\\ folder exists with .pt and .pth files
+   - Re-extract the complete archive
+
+3. If you see DLL errors:
+   - Install Visual C++ Redistributable (link above)
+   - Make sure Windows is up to date
+
+FOLDER STRUCTURE:
+----------------
+(After extraction)
+├── {APP_NAME}.bat       (CLICK THIS to start!)
+├── README.txt           (This file)
+└── {app_folder}/
+    ├── python.exe           (Embedded Python interpreter)
+    ├── python311.dll        (Python runtime)
+    ├── Lib/                 (Python standard library)
+    ├── Lib/site-packages/   (Dependencies: PyQt5, PyTorch, etc.)
+    ├── neurowings/          (Application code)
+    ├── models/              (Neural network models - REQUIRED!)
+    │   ├── yolo_detect_best.pt
+    │   ├── yolo_pose_best.pt
+    │   └── stage2_best.pth
+    ├── run.py               (Main entry point)
+    └── neurowings.log       (Created after first run)
+
+LOGS:
+-----
+The application creates "neurowings.log" in {app_folder}/ folder.
+If you encounter problems, check this file for error messages.
+
+ABOUT:
+------
+{APP_NAME} - Neural Network based Wing Analysis Tool
+Version: Portable Build
+Python: {PYTHON_VERSION} (embedded)
+
+For support and updates, visit:
+[Your repository URL here]
+
+{"=" * 60}
+'''
+    else:
+        # README внутри (старый вариант)
+        readme_content = f'''{APP_NAME} - Portable Version
 {"=" * 60}
 
 This is a portable (standalone) version of {APP_NAME}.
@@ -283,7 +385,6 @@ HOW TO RUN:
 -----------
 1. Extract this entire folder to any location
 2. Double-click "{APP_NAME}.bat" to start the application
-   (Or run "{APP_NAME}.ps1" in PowerShell)
 
 REQUIREMENTS:
 ------------
@@ -299,11 +400,10 @@ TROUBLESHOOTING:
 1. If nothing happens when you run the launcher:
    - Check "neurowings.log" file for errors
    - Make sure you extracted ALL files from the archive
-   - Try running {APP_NAME}.ps1 instead of .bat
 
-2. If you see "python.exe not found":
-   - You didn't extract the complete archive
-   - Re-extract everything from the ZIP file
+2. If you see "Models not found" error:
+   - Make sure models/ folder exists with .pt and .pth files
+   - Re-extract the complete archive
 
 3. If you see DLL errors:
    - Install Visual C++ Redistributable (link above)
@@ -312,15 +412,19 @@ TROUBLESHOOTING:
 FOLDER STRUCTURE:
 ----------------
 {APP_NAME}/
+├── {APP_NAME}.bat       (CLICK THIS to start!)
+├── README.txt           (This file)
 ├── python.exe           (Embedded Python interpreter)
 ├── python311.dll        (Python runtime)
 ├── Lib/                 (Python standard library)
 ├── Lib/site-packages/   (Dependencies: PyQt5, PyTorch, etc.)
 ├── neurowings/          (Application code)
+├── models/              (Neural network models - REQUIRED!)
+│   ├── yolo_detect_best.pt
+│   ├── yolo_pose_best.pt
+│   └── stage2_best.pth
 ├── run.py               (Main entry point)
-├── {APP_NAME}.bat       (Windows launcher)
-├── {APP_NAME}.ps1       (PowerShell launcher)
-└── README.txt           (This file)
+└── neurowings.log       (Created after first run)
 
 LOGS:
 -----
@@ -342,8 +446,15 @@ For support and updates, visit:
     log(f"Created {readme}")
 
 
-def create_zip_archive(source_dir: Path, output_zip: Path) -> None:
-    """Создать ZIP архив"""
+def create_zip_archive(source_dir: Path, output_zip: Path, include_parent: bool = True) -> None:
+    """
+    Создать ZIP архив
+
+    Args:
+        source_dir: Директория для архивирования (NeuroWings/)
+        output_zip: Путь к выходному ZIP файлу
+        include_parent: Если True, архивировать родительскую папку (launcher снаружи)
+    """
     log(f"Creating ZIP archive: {output_zip}")
 
     # Удаляем старый архив если существует
@@ -352,14 +463,27 @@ def create_zip_archive(source_dir: Path, output_zip: Path) -> None:
 
     # Создаём архив
     with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED, compresslevel=5) as zipf:
-        for file_path in source_dir.rglob('*'):
-            if file_path.is_file():
-                arcname = file_path.relative_to(source_dir.parent)
-                zipf.write(file_path, arcname)
-                # Прогресс каждые 100 файлов
-                if len(zipf.namelist()) % 100 == 0:
-                    sys.stdout.write(f"\r  Added {len(zipf.namelist())} files...")
-                    sys.stdout.flush()
+        if include_parent:
+            # Архивируем родительскую папку (launcher + README снаружи, NeuroWings/ внутри)
+            parent_dir = source_dir.parent
+            for file_path in parent_dir.rglob('*'):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(parent_dir)
+                    zipf.write(file_path, arcname)
+                    # Прогресс каждые 100 файлов
+                    if len(zipf.namelist()) % 100 == 0:
+                        sys.stdout.write(f"\r  Added {len(zipf.namelist())} files...")
+                        sys.stdout.flush()
+        else:
+            # Старый вариант: всё внутри NeuroWings/
+            for file_path in source_dir.rglob('*'):
+                if file_path.is_file():
+                    arcname = file_path.relative_to(source_dir.parent)
+                    zipf.write(file_path, arcname)
+                    # Прогресс каждые 100 файлов
+                    if len(zipf.namelist()) % 100 == 0:
+                        sys.stdout.write(f"\r  Added {len(zipf.namelist())} files...")
+                        sys.stdout.flush()
 
     print()  # Новая строка
     file_count = len(zipfile.ZipFile(output_zip, 'r').namelist())
@@ -379,7 +503,10 @@ def build_portable() -> None:
     DIST_DIR.mkdir(exist_ok=True)
 
     python_zip = BUILD_DIR / f"python-{PYTHON_VERSION}-embed-amd64.zip"
-    python_dir = DIST_DIR / APP_NAME
+
+    # НОВАЯ СТРУКТУРА: создаем промежуточную папку для launcher снаружи
+    release_dir = DIST_DIR / f"{APP_NAME}-Portable"  # Промежуточная папка
+    python_dir = release_dir / APP_NAME              # Папка с Python и приложением
 
     # 2. Скачать Embedded Python
     if not python_zip.exists():
@@ -390,9 +517,9 @@ def build_portable() -> None:
 
     # 3. Распаковать Python
     log("Step 3: Extracting Embedded Python")
-    if python_dir.exists():
-        log(f"Cleaning existing directory: {python_dir}")
-        shutil.rmtree(python_dir)
+    if release_dir.exists():
+        log(f"Cleaning existing directory: {release_dir}")
+        shutil.rmtree(release_dir)
     python_dir.mkdir(parents=True)
     extract_zip(python_zip, python_dir)
 
@@ -412,26 +539,38 @@ def build_portable() -> None:
     log("Step 6: Copying project files")
     copy_project_files(python_dir)
 
-    # 7. Создать launchers
+    # 7. Создать launchers СНАРУЖИ (в release_dir)
     log("Step 7: Creating launchers")
-    create_launchers(python_dir)
+    create_launchers(release_dir, create_external=True)
 
     # 8. Создать ZIP архив
     log("Step 8: Creating ZIP archive")
     output_zip = DIST_DIR / f"{APP_NAME}-Portable-Windows.zip"
-    create_zip_archive(python_dir, output_zip)
+    create_zip_archive(python_dir, output_zip, include_parent=True)
 
     # 9. Готово!
     log("=" * 60)
     log("BUILD COMPLETE!")
     log("=" * 60)
-    log(f"Portable folder: {python_dir}")
+    log(f"Release folder: {release_dir}")
+    log(f"  - Launcher: {release_dir / f'{APP_NAME}.bat'}")
+    log(f"  - App folder: {python_dir}")
     log(f"ZIP archive: {output_zip}")
     log(f"Size: {output_zip.stat().st_size / (1024 * 1024):.1f} MB")
     log("")
     log("To test locally:")
-    log(f"  cd {python_dir}")
+    log(f"  cd {release_dir}")
     log(f"  {APP_NAME}.bat")
+    log("")
+    log("Structure:")
+    log(f"  {release_dir.name}/")
+    log(f"  ├── {APP_NAME}.bat      (launcher)")
+    log(f"  ├── README.txt")
+    log(f"  └── {APP_NAME}/")
+    log(f"      ├── python.exe")
+    log(f"      ├── neurowings/")
+    log(f"      ├── models/         (neural network models)")
+    log(f"      └── run.py")
     log("")
     log("To distribute:")
     log(f"  Share {output_zip}")
