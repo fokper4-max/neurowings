@@ -18,6 +18,11 @@ jobs:
       with:
         lfs: true
 
+    - name: Checkout LFS files
+      run: |
+        git lfs pull
+      shell: bash
+
     - name: Set up Python
       uses: actions/setup-python@v5
       with:
@@ -25,6 +30,14 @@ jobs:
 
     - name: Verify models exist
       run: |
+        echo Checking models directory...
+        dir models
+        echo.
+        echo Checking file sizes...
+        for %%F in (models\*.pt models\*.pth) do (
+          echo %%F - %%~zF bytes
+        )
+        echo.
         if not exist "models\yolo_detect_best.pt" (
           echo ERROR: yolo_detect_best.pt not found!
           exit /b 1
@@ -38,7 +51,6 @@ jobs:
           exit /b 1
         )
         echo All models found!
-        dir models
       shell: cmd
 
     - name: Build portable bundle
