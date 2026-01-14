@@ -1,4 +1,4 @@
-name: Build Portable v2 (DLL Fix)
+name: Build Portable v3 (Models + External Launcher)
 
 on:
   # Только ручной запуск
@@ -21,22 +21,57 @@ jobs:
       with:
         python-version: '3.11'
 
+    - name: Verify models exist
+      run: |
+        if not exist "models\yolo_detect_best.pt" (
+          echo ERROR: yolo_detect_best.pt not found!
+          exit /b 1
+        )
+        if not exist "models\yolo_pose_best.pt" (
+          echo ERROR: yolo_pose_best.pt not found!
+          exit /b 1
+        )
+        if not exist "models\stage2_best.pth" (
+          echo ERROR: stage2_best.pth not found!
+          exit /b 1
+        )
+        echo All models found!
+        dir models
+      shell: cmd
+
     - name: Build portable bundle
       run: |
         python build_portable.py
       shell: cmd
 
+    - name: Verify build output
+      run: |
+        echo Checking build output...
+        dir dist_portable\NeuroWings-Portable
+        dir dist_portable\NeuroWings-Portable\NeuroWings
+        dir dist_portable\NeuroWings-Portable\NeuroWings\models
+        if not exist "dist_portable\NeuroWings-Portable\NeuroWings.bat" (
+          echo ERROR: Launcher not found!
+          exit /b 1
+        )
+        if not exist "dist_portable\NeuroWings-Portable\NeuroWings\models\yolo_detect_best.pt" (
+          echo ERROR: Models not copied!
+          exit /b 1
+        )
+        echo Build verification passed!
+      shell: cmd
+
     - name: Upload portable folder artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NeuroWings-Portable-v2-Folder
-        path: dist_portable/NeuroWings/
+        name: NeuroWings-Portable-v3-Folder
+        path: dist_portable/NeuroWings-Portable/
         retention-days: 30
 
     - name: Upload portable ZIP artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NeuroWings-Portable-v2-ZIP-FIXED-DLL
+        name: NeuroWings-Portable-v3-ZIP
         path: dist_portable/NeuroWings-Portable-Windows.zip
         retention-days: 30
 
@@ -57,7 +92,7 @@ jobs:
 
           1. Скачайте `NeuroWings-Portable-Windows.zip`
           2. Распакуйте архив в любую папку
-          3. Запустите `NeuroWings.bat`
+          3. Запустите `NeuroWings.bat` (он находится СНАРУЖИ папки NeuroWings)
 
           ## Требования
 
@@ -65,14 +100,22 @@ jobs:
           - Visual C++ Redistributable 2015-2022 (обычно уже установлен)
             Если приложение не запускается, установите: https://aka.ms/vs/17/release/vc_redist.x64.exe
 
+          ## Что исправлено в v3
+
+          ✅ Модели нейросетей теперь включены в сборку (models/ папка)
+          ✅ Launcher (NeuroWings.bat) теперь находится снаружи для удобства
+          ✅ Правильная структура проекта восстановлена
+          ✅ Фиксы путей к DLL PyTorch
+
           ## Поддержка
 
           При возникновении проблем:
-          1. Проверьте файл `neurowings.log` в папке приложения
-          2. Создайте issue в репозитории с описанием проблемы
+          1. Проверьте файл `NeuroWings/neurowings.log` в папке приложения
+          2. Убедитесь что папка `NeuroWings/models/` содержит 3 файла (.pt и .pth)
+          3. Создайте issue в репозитории с описанием проблемы
 
           ## Размер
 
-          ~500 MB (включает Python + PyTorch + все зависимости)
+          ~600 MB (включает Python + PyTorch + модели нейросетей + все зависимости)
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
