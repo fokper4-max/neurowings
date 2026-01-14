@@ -42,8 +42,7 @@ neurowings.log
 *.ui.py
 
 # Project specific
-models/*.pt
-models/*.pth
+# Models теперь включены в Git LFS для полной сборки
 !models/.gitkeep
 
 # Data files
