@@ -1,4 +1,4 @@
-name: Build Portable v3 (Models + External Launcher)
+name: Build Portable LITE (без моделей)
 
 on:
   # Только ручной запуск
@@ -16,16 +16,19 @@ jobs:
     - name: Checkout code
       uses: actions/checkout@v4
 
-    - name: Download neural network models
+    - name: Create empty models folder with instructions
       run: |
-        echo Downloading models from GitHub Release...
-        curl -L -o models.tar.gz https://github.com/fokper4-max/neurowings/releases/download/models-v1.0/models.tar.gz
-        echo Extracting models...
         mkdir models
-        tar -xzf models.tar.gz -C models/
-        echo Models downloaded successfully!
-        ls -lh models/
-      shell: bash
+        echo Neural network models should be placed here > models\README.txt
+        echo. >> models\README.txt
+        echo Download models from: https://github.com/fokper4-max/neurowings/releases/tag/models-v1.0 >> models\README.txt
+        echo. >> models\README.txt
+        echo Extract models.tar.gz files to this folder: >> models\README.txt
+        echo   - yolo_detect_best.pt >> models\README.txt
+        echo   - yolo_pose_best.pt >> models\README.txt
+        echo   - stage2_best.pth >> models\README.txt
+        echo   - best.pt >> models\README.txt
+      shell: cmd
 
     - name: Set up Python
       uses: actions/setup-python@v5
@@ -40,14 +43,14 @@ jobs:
     - name: Upload portable folder artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NeuroWings-Portable-v3-Folder
+        name: NeuroWings-Portable-LITE-Folder
         path: dist_portable/NeuroWings-Portable/
         retention-days: 30
 
     - name: Upload portable ZIP artifact
       uses: actions/upload-artifact@v4
       with:
-        name: NeuroWings-Portable-v3-ZIP
+        name: NeuroWings-Portable-LITE-ZIP
         path: dist_portable/NeuroWings-Portable-Windows.zip
         retention-days: 30
 
@@ -66,11 +69,13 @@ jobs:
 
           ## Установка и запуск
 
-          1. Скачайте `NeuroWings-Portable-Windows.zip`
-          2. Распакуйте архив в любую папку
-          3. Запустите `NeuroWings.bat` (находится СНАРУЖИ папки NeuroWings)
+          1. Скачайте `NeuroWings-Portable-Windows.zip` (~100 MB)
+          2. Скачайте `models.tar.gz` из https://github.com/fokper4-max/neurowings/releases/tag/models-v1.0 (~310 MB)
+          3. Распакуйте `NeuroWings-Portable-Windows.zip`
+          4. Распакуйте `models.tar.gz` и положите файлы в `NeuroWings-Portable/NeuroWings/models/`
+          5. Запустите `NeuroWings.bat` (находится СНАРУЖИ папки NeuroWings)
 
-          **Модели нейросетей уже включены в архив!**
+          **LITE версия - модели скачиваются отдельно для уменьшения размера архива.**
 
           **Структура после распаковки:**
           ```
@@ -103,6 +108,8 @@ jobs:
 
           ## Размер
 
-          ~600 MB (включает Python + PyTorch + модели нейросетей)
+          - Приложение: ~100 MB
+          - Модели (отдельно): ~310 MB
+          - Всего: ~410 MB после установки
       env:
         GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
