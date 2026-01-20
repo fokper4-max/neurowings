@@ -5,7 +5,7 @@ NeuroWings - Масштабируемый графический вид
 """
 
 from PyQt5.QtWidgets import (
-    QGraphicsView, QGraphicsRectItem, QMenu
+    QGraphicsView, QGraphicsRectItem, QMenu, QToolButton
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPainter, QPen, QBrush, QColor
@@ -39,6 +39,8 @@ class ZoomableGraphicsView(QGraphicsView):
         self.setMouseTracking(True)
         self.setContextMenuPolicy(Qt.CustomContextMenu)
         self.customContextMenuRequested.connect(self._show_context_menu)
+        self._add_scroll_buttons()
+        self._position_scroll_buttons()
         
         self._zoom = 1.0
         self._dragging_point = None
@@ -81,9 +83,66 @@ class ZoomableGraphicsView(QGraphicsView):
         elif mode == EditMode.ADD:
             self.setDragMode(QGraphicsView.NoDrag)
             self.setCursor(Qt.CrossCursor)
-        elif mode == EditMode.BBOX:
-            self.setDragMode(QGraphicsView.NoDrag)
-            self.setCursor(Qt.CrossCursor)
+
+    def _add_scroll_buttons(self):
+        """Добавить стрелки-навигации рядом со скроллами"""
+        # Кнопки у вертикального скролла
+        self.btn_up = QToolButton(self)
+        self.btn_up.setText("▲")
+        self.btn_up.setFixedSize(18, 18)
+        self.btn_up.clicked.connect(lambda: self._nudge(0, -50))
+        self.btn_up.setAutoRaise(True)
+
+        self.btn_down = QToolButton(self)
+        self.btn_down.setText("▼")
+        self.btn_down.setFixedSize(18, 18)
+        self.btn_down.clicked.connect(lambda: self._nudge(0, 50))
+        self.btn_down.setAutoRaise(True)
+
+        # Кнопки у горизонтального скролла
+        self.btn_left = QToolButton(self)
+        self.btn_left.setText("◀")
+        self.btn_left.setFixedSize(18, 18)
+        self.btn_left.clicked.connect(lambda: self._nudge(-50, 0))
+        self.btn_left.setAutoRaise(True)
+
+        self.btn_right = QToolButton(self)
+        self.btn_right.setText("▶")
+        self.btn_right.setFixedSize(18, 18)
+        self.btn_right.clicked.connect(lambda: self._nudge(50, 0))
+        self.btn_right.setAutoRaise(True)
+
+        for btn in (self.btn_up, self.btn_down, self.btn_left, self.btn_right):
+            btn.show()
+
+    def resizeEvent(self, event):
+        super().resizeEvent(event)
+        self._position_scroll_buttons()
+
+    def _position_scroll_buttons(self):
+        """Расположить стрелки у краёв виджета рядом со скроллами"""
+        margin = 2
+        sb_v = self.verticalScrollBar()
+        sb_h = self.horizontalScrollBar()
+        # Вертикальные стрелки справа от контента, по центру высоты
+        x_v = self.viewport().width() + sb_v.width() - self.btn_up.width() - margin
+        mid_y = self.viewport().height() // 2
+        self.btn_up.move(x_v, mid_y - self.btn_up.height() - margin)
+        self.btn_down.move(x_v, mid_y + margin)
+        self.btn_up.raise_()
+        self.btn_down.raise_()
+        # Горизонтальные стрелки снизу, по центру ширины
+        y_h = self.viewport().height() + sb_h.height() - self.btn_left.height() - margin
+        mid_x = self.viewport().width() // 2
+        self.btn_left.move(mid_x - self.btn_left.width() - margin, y_h)
+        self.btn_right.move(mid_x + margin, y_h)
+        self.btn_left.raise_()
+        self.btn_right.raise_()
+
+    def _nudge(self, dx, dy):
+        """Сдвиг вида кнопками-стрелками"""
+        self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + dx)
+        self.verticalScrollBar().setValue(self.verticalScrollBar().value() + dy)
     
     def wheelEvent(self, event):
         """Масштабирование колесом мыши"""

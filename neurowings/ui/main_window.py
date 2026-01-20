@@ -4,6 +4,8 @@
 NeuroWings - Главное окно приложения
 """
 
+import os
+import json
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
 
@@ -14,7 +16,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QToolBar, QFileDialog, QMessageBox, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QShortcut, QRadioButton, QButtonGroup, QAction, QTabWidget, QGridLayout,
-    QApplication, QMenu
+    QApplication, QMenu, QSizePolicy
 )
 from PyQt5.QtCore import Qt, pyqtSignal
 from PyQt5.QtGui import QPixmap, QColor, QKeySequence, QPen
@@ -24,13 +26,15 @@ from ..core import (
     COLOR_NORMAL, COLOR_YOLO, COLOR_STAGE1, COLOR_STAGE2, COLOR_GT,
     DEFAULT_POINT_RADIUS, YOLO_TO_WINGSDIG,
     WingPoint, BBox, Wing, ImageData, EditMode,
-    get_device, load_stage2_model, TORCH_AVAILABLE
+    get_device, load_stage2_model, load_stage2_portable_model, load_subpixel_model, TORCH_AVAILABLE
 )
+from ..core.tps_io import load_tps_into_image, save_tps_from_image
 
 from . import (
     PointItem, WingLabelItem, BBoxItem, MeasurementLineItem,
     ZoomableGraphicsView, AnalysisWidget, GraphsWidget,
-    InterpretationWidget, BatchResultsWidget, PointSettingsDialog
+    InterpretationWidget, BatchResultsWidget, PointSettingsDialog,
+    GlobalInterpretationWidget
 )
 
 from ..workers import ProcessingWorker
@@ -41,6 +45,10 @@ class MainWindow(QMainWindow):
     
     def __init__(self):
         super().__init__()
+        self._gpt_client = None
+        self._gpt_model = None
+        self._gpt_enabled = False
+        self._load_gpt_config()
         self.setWindowTitle(f"{APP_NAME} v{APP_VERSION}")
         self.resize(1500, 950)
         
@@ -54,6 +62,14 @@ class MainWindow(QMainWindow):
         self.model_det = None
         self.model_pose = None
         self.model_stage2 = None
+        self.model_stage2_portable = None
+        self.model_subpixel = None
+        self.single_wing_mode = False
+        self.left_collapsed = False
+        self.right_collapsed = False
+        self._saved_splitter_sizes = None
+        self._saved_left_size = 180
+        self._saved_right_size = 250
         
         # Состояние UI
         self.point_items: List[PointItem] = []
@@ -96,8 +112,8 @@ class MainWindow(QMainWindow):
         main_layout.addWidget(self.main_splitter)
         
         # ЛЕВАЯ ПАНЕЛЬ - список файлов
-        left_panel = QWidget()
-        left_layout = QVBoxLayout(left_panel)
+        self.left_panel = QWidget()
+        left_layout = QVBoxLayout(self.left_panel)
         left_layout.setContentsMargins(5, 5, 5, 5)
         
         files_header = QHBoxLayout()
@@ -127,8 +143,8 @@ class MainWindow(QMainWindow):
         self.lbl_files_stats = QLabel("0 файлов")
         left_layout.addWidget(self.lbl_files_stats)
         
-        left_panel.setMaximumWidth(200)
-        self.main_splitter.addWidget(left_panel)
+        self.left_panel.setMaximumWidth(200)
+        self.main_splitter.addWidget(self.left_panel)
         
         # ЦЕНТРАЛЬНАЯ ПАНЕЛЬ
         center_widget = QWidget()
@@ -194,8 +210,12 @@ class MainWindow(QMainWindow):
         # Вкладка интерпретации
         self.interpretation_widget = InterpretationWidget()
         self.tab_widget.addTab(self.interpretation_widget, "🐝 Интерпретация")
+        # Вкладка общей интерпретации (агрегат по всем фото)
+        self.global_interpretation_widget = GlobalInterpretationWidget(title="🌐 Общая интерпретация")
+        self.tab_widget.addTab(self.global_interpretation_widget, "🌐 Общая интерпретация")
         
         self.analysis_widget.set_graphs_widget(self.graphs_widget)
+        self._apply_gpt_to_widgets()
         
         center_layout.addWidget(self.tab_widget)
         self.main_splitter.addWidget(center_widget)
@@ -302,6 +322,25 @@ class MainWindow(QMainWindow):
             group.buttonClicked.connect(self._on_point_model_changed)
             self.point_model_groups.append(group)
         
+        # Кнопки применения выбора
+        actions_layout = QHBoxLayout()
+        actions_layout.setSpacing(4)
+        btn_apply_current = QPushButton("К фото")
+        btn_apply_current.setToolTip("Применить выбор моделей точек ко всем крыльям текущего фото")
+        btn_apply_current.setMaximumWidth(70)
+        btn_apply_current.setMinimumHeight(22)
+        btn_apply_current.clicked.connect(lambda: self._apply_point_selection(scope="current"))
+        actions_layout.addWidget(btn_apply_current)
+
+        btn_apply_all = QPushButton("Ко всем")
+        btn_apply_all.setToolTip("Применить выбор моделей точек ко всем открытым фото")
+        btn_apply_all.setMaximumWidth(70)
+        btn_apply_all.setMinimumHeight(22)
+        btn_apply_all.clicked.connect(lambda: self._apply_point_selection(scope="all"))
+        actions_layout.addWidget(btn_apply_all)
+
+        sel_layout.addLayout(actions_layout, NUM_POINTS + 2, 1, 1, 3)
+        
         right_layout.addWidget(self.point_selection_group)
 
         # Группа вспомогательных элементов
@@ -326,6 +365,11 @@ class MainWindow(QMainWindow):
         self.main_splitter.addWidget(self.right_panel)
 
         self.main_splitter.setSizes([180, 950, 250])
+        self._saved_splitter_sizes = self.main_splitter.sizes()
+        if len(self._saved_splitter_sizes) >= 1:
+            self._saved_left_size = self._saved_splitter_sizes[0]
+        if len(self._saved_splitter_sizes) >= 3:
+            self._saved_right_size = self._saved_splitter_sizes[2]
 
         # Подключаем сигнал смены вкладки ПОСЛЕ того, как весь UI создан
         self.tab_widget.currentChanged.connect(self._on_tab_changed)
@@ -364,6 +408,9 @@ class MainWindow(QMainWindow):
         
         help_menu = menubar.addMenu("Справка")
         help_menu.addAction("О программе", self._show_about)
+
+        gpt_menu = menubar.addMenu("GPT")
+        gpt_menu.addAction("Настройки GPT...", self._show_gpt_settings)
     
     def _setup_toolbar(self):
         """Настройка панели инструментов"""
@@ -403,6 +450,22 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction("⚡ Обработать", self._process_smart)
         toolbar.addAction("💾 Сохранить", self._save_current)
+
+        # Кнопки сворачивания панелей
+        toolbar.addSeparator()
+        toolbar.addAction("⬅ панель", self._toggle_left_panel)
+        toolbar.addAction("панель ➡", self._toggle_right_panel)
+
+        # Спейсер и чекбокс одиночного крыла справа
+        spacer = QWidget()
+        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar.addWidget(spacer)
+
+        self.chk_single_wing = QCheckBox("Режим одиночного крыла")
+        self.chk_single_wing.setToolTip("Анализ/графики по всем фото сразу (1 фото = 1 крыло)")
+        self.chk_single_wing.setChecked(False)
+        self.chk_single_wing.toggled.connect(self._toggle_single_wing_mode)
+        toolbar.addWidget(self.chk_single_wing)
     
     def _setup_shortcuts(self):
         """Настройка горячих клавиш"""
@@ -419,12 +482,24 @@ class MainWindow(QMainWindow):
     def _on_tab_changed(self, index):
         """Обработка смены вкладки"""
         # Показываем правую панель только на вкладке "Изображение" (index=0)
+        total = sum(self.main_splitter.sizes()) or (self._saved_left_size + 900 + self._saved_right_size)
         if index == 0:
-            self.right_panel.setVisible(True)
-            self.main_splitter.setSizes([180, 950, 250])
+            left_size = 0 if self.left_collapsed else self._saved_left_size
+            right_size = 0 if self.right_collapsed else self._saved_right_size
+            center_size = max(0, total - left_size - right_size)
+            self.left_panel.setVisible(not self.left_collapsed)
+            self.right_panel.setVisible(not self.right_collapsed)
+            self.main_splitter.setSizes([left_size, center_size, right_size])
         else:
+            left_size = 0 if self.left_collapsed else self._saved_left_size
+            center_size = max(0, total - left_size)
+            self.left_panel.setVisible(not self.left_collapsed)
             self.right_panel.setVisible(False)
-            self.main_splitter.setSizes([180, 1200, 0])
+            self.main_splitter.setSizes([left_size, center_size, 0])
+
+        # Если открыли вкладку общей интерпретации — пересчитать (лениво)
+        if self.tab_widget.widget(index) is self.global_interpretation_widget:
+            self._update_global_interpretation(force=True)
 
     def _apply_light_theme(self):
         """Применить светлую тему оформления"""
@@ -601,7 +676,27 @@ class MainWindow(QMainWindow):
                         break
                 if self.model_stage2:
                     break
-            
+
+            # Поиск портативной Stage2 (нормализованный выход, старая логика)
+            for name in ["stage2_portable.pth", "stage2_portable_best.pth", "stage2_old.pth"]:
+                for search_dir in search_dirs:
+                    path = search_dir / name
+                    if path.exists():
+                        self.model_stage2_portable = load_stage2_portable_model(str(path), self.device)
+                        break
+                if self.model_stage2_portable:
+                    break
+
+            # Поиск модели SubPixel
+            for name in ["subpixel_best.pth", "subpixel.pth"]:
+                for search_dir in search_dirs:
+                    path = search_dir / name
+                    if path.exists():
+                        self.model_subpixel = load_subpixel_model(str(path), self.device)
+                        break
+                if self.model_subpixel:
+                    break
+
             status = []
             if self.model_det:
                 status.append("Det✓")
@@ -609,6 +704,10 @@ class MainWindow(QMainWindow):
                 status.append("Pose✓")
             if self.model_stage2:
                 status.append("Stage2✓")
+            if self.model_stage2_portable:
+                status.append("Stage2-old✓")
+            if self.model_subpixel:
+                status.append("SubPixel✓")
             self.statusBar().showMessage(f"Модели: {' | '.join(status) if status else 'не найдены'}")
             
         except ImportError:
@@ -645,7 +744,7 @@ class MainWindow(QMainWindow):
         for ext in ['*.jpg', '*.JPG', '*.jpeg', '*.JPEG', '*.png', '*.PNG']:
             images.extend(self.current_folder.glob(ext))
         
-        for img_path in sorted(images):
+        for idx, img_path in enumerate(sorted(images), start=1):
             img_data = ImageData(path=img_path)
             self.images[str(img_path)] = img_data
             
@@ -654,7 +753,7 @@ class MainWindow(QMainWindow):
                 self._load_tps_for_image(img_data, tps_path)
             
             has_data = "✓" if img_data.wings else "○"
-            item = QListWidgetItem(f"{has_data} {img_path.name}")
+            item = QListWidgetItem(f"{has_data} {idx}) {img_path.name}")
             item.setData(Qt.UserRole, str(img_path))
             item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
             item.setCheckState(Qt.Unchecked)
@@ -668,50 +767,14 @@ class MainWindow(QMainWindow):
             self._load_current_image()
     
     def _load_tps_for_image(self, img_data: ImageData, tps_path: Path):
-        """Загрузить TPS файл"""
+        """Загрузить TPS файл (через tps_io)"""
         try:
-            if img_data.height == 0:
-                pixmap = QPixmap(str(img_data.path))
-                img_data.width = pixmap.width()
-                img_data.height = pixmap.height()
-            
-            with open(tps_path, 'r', encoding='utf-8', errors='ignore') as f:
-                lines = [l.strip() for l in f.readlines()]
-            
-            points = []
-            i = 0
-            while i < len(lines):
-                if lines[i].upper().startswith('LM='):
-                    npoints = int(lines[i].split('=')[1])
-                    for j in range(1, npoints + 1):
-                        if i + j < len(lines):
-                            line = lines[i + j]
-                            if line.startswith('IMAGE') or line.startswith('ID'):
-                                break
-                            coords = line.replace(',', '.').split()
-                            if len(coords) >= 2:
-                                try:
-                                    x = float(coords[0].replace(',', '.'))
-                                    y = float(coords[1].replace(',', '.'))
-                                    # TPS: Y=0 внизу, экран: Y=0 вверху - инвертируем
-                                    y_screen = img_data.height - y  # TPS/WingsDig: Y отсчитывается снизу
-                                    points.append((x, y_screen))
-                                except:
-                                    pass
-                    break
-                i += 1
-            
-            img_data.wings.clear()
-            for w_idx in range(len(points) // NUM_POINTS):
-                wing_points = points[w_idx * NUM_POINTS:(w_idx + 1) * NUM_POINTS]
-                wing = Wing(points=[WingPoint(x=pt[0], y=pt[1]) for pt in wing_points])
-                # Точки из TPS файла помечаем как 'gt' (ground truth)
+            load_tps_into_image(img_data, tps_path)
+            # Точки из TPS считаем ground truth
+            for wing in img_data.wings:
                 wing.point_sources = ['gt'] * NUM_POINTS
-                img_data.wings.append(wing)
-            
             img_data.is_processed = True
             img_data.analyze_all_wings()
-            
         except Exception as e:
             print(f"Ошибка TPS: {e}")
     
@@ -750,8 +813,8 @@ class MainWindow(QMainWindow):
         self._update_display()
         self.view.fit_in_view()
 
-        self.analysis_widget.update_statistics(self.current_image)
-        self.interpretation_widget.update_interpretation(self.current_image)
+        self._update_analysis_widget()
+        self._update_interpretation_widgets()
     
     def _prev_file(self):
         """Предыдущий файл"""
@@ -824,8 +887,43 @@ class MainWindow(QMainWindow):
         self.current_image.is_modified = True
         self.current_image.analyze_all_wings()
         self._update_display()
-        self.analysis_widget.update_statistics(self.current_image)
-        self.interpretation_widget.update_interpretation(self.current_image)
+        self._update_analysis_widget()
+        self._update_interpretation_widgets()
+
+    def _get_point_model_selection(self):
+        """Считать выбранные модели для каждой точки из радиокнопок"""
+        selection = []
+        for group in self.point_model_groups:
+            checked = group.checkedButton()
+            selection.append(checked.property('model_type') if checked else 'stage2')
+        return selection
+
+    def _apply_point_selection(self, scope: str):
+        """
+        Применить текущий выбор моделей точек.
+        scope: 'current' — только текущее фото; 'all' — все открытые.
+        """
+        selection = self._get_point_model_selection()
+        if scope == "all":
+            targets = list(self.images.values())
+        else:
+            targets = [self.current_image] if self.current_image else []
+
+        for img_data in targets:
+            if not img_data or not img_data.wings:
+                continue
+            for wing in img_data.wings:
+                for idx, model_type in enumerate(selection):
+                    if idx < len(wing.point_sources):
+                        wing.point_sources[idx] = model_type
+            img_data.is_modified = True
+            img_data.analyze_all_wings()
+
+        if self.current_image:
+            self._update_display()
+        self._update_analysis_widget()
+        self.batch_widget.update_batch_results(self.images)
+        self._update_interpretation_widgets()
 
     def _set_all_points_model(self, model_type: str):
         """Переключить все точки на указанную модель"""
@@ -860,8 +958,8 @@ class MainWindow(QMainWindow):
         self.current_image.is_modified = True
         self.current_image.analyze_all_wings()
         self._update_display()
-        self.analysis_widget.update_statistics(self.current_image)
-        self.interpretation_widget.update_interpretation(self.current_image)
+        self._update_analysis_widget()
+        self._update_interpretation_widgets()
 
     def _update_display(self):
         """Обновить отображение"""
@@ -1144,10 +1242,10 @@ class MainWindow(QMainWindow):
 
             cx, cy = self.current_image.wings[row].get_center()
 
-            # Автоматически увеличиваем масштаб до 2x и центрируем на крыле
+            # Автоматически увеличиваем масштаб до ~1.6x (эквивалент двух нажатий "-" от 2x) и центрируем на крыле
             self.view.resetTransform()
-            self.view.scale(2, 2)
-            self.view._zoom = 2.0
+            self.view.scale(1.6, 1.6)
+            self.view._zoom = 1.6
             self.view.centerOn(cx, cy)
     
     def _goto_wing(self, wing_idx: int):
@@ -1164,11 +1262,11 @@ class MainWindow(QMainWindow):
         for pt_item in self.point_items:
             if pt_item.wing_idx == wing_idx and pt_item.source_type == 'active':
                 pt_item.set_selected(True)
-        
+
         cx, cy = self.current_image.wings[wing_idx].get_center()
         self.view.resetTransform()
-        self.view.scale(2, 2)
-        self.view._zoom = 2.0
+        self.view.scale(1.6, 1.6)
+        self.view._zoom = 1.6
         self.view.centerOn(cx, cy)
         
         self.wings_table.selectRow(wing_idx)
@@ -1216,8 +1314,8 @@ class MainWindow(QMainWindow):
                 wing.analyze(image_height=self.current_image.height if self.current_image.height > 0 else None)
                 self.current_image.analyze_all_wings()  # Пересчитываем все крылья
                 self._update_display()
-                self.analysis_widget.update_statistics(self.current_image)
-                self.interpretation_widget.update_interpretation(self.current_image)
+                self._update_analysis_widget()
+                self._update_interpretation_widgets()
                 self._update_wings_table()  # Обновляем таблицу крыльев ПОСЛЕ всех расчетов
                 self.batch_widget.update_batch_results(self.images)
     
@@ -1242,12 +1340,12 @@ class MainWindow(QMainWindow):
         if 0 <= wing_idx < len(self.current_image.wings):
             wing = self.current_image.wings[wing_idx]
             wing.bbox = BBox(x1, y1, x2, y2)
-            self.current_image.is_modified = True
-            self.current_image.analyze_all_wings()
-            self._update_display()
-            self.analysis_widget.update_statistics(self.current_image)
-            self.interpretation_widget.update_interpretation(self.current_image)
-            self.batch_widget.update_batch_results(self.images)
+        self.current_image.is_modified = True
+        self.current_image.analyze_all_wings()
+        self._update_display()
+        self._update_analysis_widget()
+        self._update_interpretation_widgets()
+        self.batch_widget.update_batch_results(self.images)
 
     def _on_point_delete(self, wing_idx, point_idx):
         """Удаление точки или крыла"""
@@ -1285,8 +1383,8 @@ class MainWindow(QMainWindow):
                         self.current_image.is_modified = True
                         wing.analyze()  # Пересчитываем только это крыло
                         self._update_display()
-                        self.analysis_widget.update_statistics(self.current_image)
-                        self.interpretation_widget.update_interpretation(self.current_image)
+                        self._update_analysis_widget()
+                        self._update_interpretation_widgets()
         else:
             # Удаляем всё крыло
             reply = QMessageBox.question(
@@ -1298,8 +1396,8 @@ class MainWindow(QMainWindow):
                 self.current_image.is_modified = True
                 self.current_image.analyze_all_wings()  # Пересчитываем все крылья
                 self._update_display()
-                self.analysis_widget.update_statistics(self.current_image)
-                self.interpretation_widget.update_interpretation(self.current_image)
+                self._update_analysis_widget()
+                self._update_interpretation_widgets()
                 self.batch_widget.update_batch_results(self.images)
     
     def _on_bbox_delete(self, wing_idx):
@@ -1336,7 +1434,7 @@ class MainWindow(QMainWindow):
             self.current_image.is_modified = True
             self._cancel_adding()
             self._update_display()
-            self.analysis_widget.update_statistics(self.current_image)
+            self._update_analysis_widget()
             self.batch_widget.update_batch_results(self.images)
             self.statusBar().showMessage("Крыло добавлено!")
     
@@ -1377,10 +1475,12 @@ class MainWindow(QMainWindow):
         
         self.progress_bar.setVisible(True)
         self.progress_bar.setRange(0, len(paths))
-        
+
         self.worker = ProcessingWorker(
             paths, self.model_det, self.model_pose,
-            self.model_stage2, self.device
+            self.model_stage2, self.device,
+            model_subpixel=self.model_subpixel,
+            model_stage2_portable=self.model_stage2_portable
         )
         self.worker.progress.connect(self._on_progress)
         self.worker.finished.connect(self._on_finished)
@@ -1422,8 +1522,8 @@ class MainWindow(QMainWindow):
         
         self._update_files_stats()
         self._update_display()
-        self.analysis_widget.update_statistics(self.current_image)
-        self.interpretation_widget.update_interpretation(self.current_image)
+        self._update_analysis_widget()
+        self._update_interpretation_widgets()
         self.batch_widget.update_batch_results(self.images)
         
         self.statusBar().showMessage(f"Готово: {len(results)}")
@@ -1432,6 +1532,197 @@ class MainWindow(QMainWindow):
         """Ошибка обработки"""
         self.progress_bar.setVisible(False)
         QMessageBox.critical(self, "Ошибка", msg)
+
+    def _toggle_left_panel(self):
+        """Свернуть/развернуть левую панель со списком файлов"""
+        if not hasattr(self, "left_panel"):
+            return
+        sizes = self.main_splitter.sizes()
+        total = sum(sizes) or (self._saved_left_size + 900 + self._saved_right_size)
+        right_width = 0 if self.right_collapsed else (sizes[2] if len(sizes) > 2 and sizes[2] > 0 else self._saved_right_size)
+
+        if not self.left_collapsed:
+            if len(sizes) > 0 and sizes[0] > 0:
+                self._saved_left_size = sizes[0]
+            center_width = total - right_width
+            self.main_splitter.setSizes([0, center_width, right_width])
+            self.left_panel.setVisible(False)
+            self.left_collapsed = True
+        else:
+            center_width = max(0, total - self._saved_left_size - right_width)
+            self.main_splitter.setSizes([self._saved_left_size, center_width, right_width])
+            self.left_panel.setVisible(True)
+            self.left_collapsed = False
+
+    def _toggle_right_panel(self):
+        """Свернуть/развернуть правую панель"""
+        sizes = self.main_splitter.sizes()
+        total = sum(sizes) or (self._saved_left_size + 900 + self._saved_right_size)
+        left_width = 0 if self.left_collapsed else (sizes[0] if len(sizes) > 0 and sizes[0] > 0 else self._saved_left_size)
+
+        if not self.right_collapsed:
+            if len(sizes) > 2 and sizes[2] > 0:
+                self._saved_right_size = sizes[2]
+            center_width = total - left_width
+            self.main_splitter.setSizes([left_width, center_width, 0])
+            self.right_panel.setVisible(False)
+            self.right_collapsed = True
+        else:
+            center_width = max(0, total - left_width - self._saved_right_size)
+            self.main_splitter.setSizes([left_width, center_width, self._saved_right_size])
+            self.right_panel.setVisible(True)
+            self.right_collapsed = False
+
+    def _toggle_single_wing_mode(self, checked):
+        """Включение/выключение режима одиночного крыла (агрегирование по всем фото)"""
+        self.single_wing_mode = checked
+        self._update_analysis_widget()
+        self._update_interpretation_widgets()
+
+    def _load_gpt_config(self):
+        self._gpt_config_path = Path.home() / ".neuroWingHybrid_gpt.json"
+        cfg = {"api_key": "", "model": "gpt-4o-mini", "enabled": False}
+        if self._gpt_config_path.exists():
+            try:
+                cfg.update(json.loads(self._gpt_config_path.read_text()))
+            except Exception:
+                pass
+        self._gpt_api_key = cfg.get("api_key", "")
+        self._gpt_model = cfg.get("model", "gpt-4o-mini")
+        self._gpt_enabled = bool(cfg.get("enabled", False) and self._gpt_api_key)
+        self._init_gpt_client()
+
+    def _save_gpt_config(self):
+        cfg = {"api_key": self._gpt_api_key, "model": self._gpt_model, "enabled": self._gpt_enabled}
+        try:
+            self._gpt_config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
+        except Exception as e:
+            print(f"Не удалось сохранить GPT конфиг: {e}")
+
+    def _init_gpt_client(self):
+        try:
+            if self._gpt_enabled and self._gpt_api_key:
+                from openai import OpenAI
+                self._gpt_client = OpenAI(api_key=self._gpt_api_key)
+            else:
+                self._gpt_client = None
+        except Exception as e:
+            print(f"GPT инициализация не удалась: {e}")
+            self._gpt_client = None
+
+    def _show_gpt_settings(self):
+        from PyQt5.QtWidgets import QDialog, QFormLayout, QLineEdit, QDialogButtonBox, QCheckBox
+        dlg = QDialog(self)
+        dlg.setWindowTitle("Настройки GPT")
+        layout = QFormLayout(dlg)
+        key_edit = QLineEdit(self._gpt_api_key)
+        key_edit.setEchoMode(QLineEdit.PasswordEchoOnEdit)
+        model_edit = QLineEdit(self._gpt_model or "gpt-4o-mini")
+        enabled_chk = QCheckBox("Включить GPT интерпретацию")
+        enabled_chk.setChecked(self._gpt_enabled)
+        layout.addRow("API ключ:", key_edit)
+        layout.addRow("Модель:", model_edit)
+        layout.addRow("", enabled_chk)
+
+        test_btn = QPushButton("Проверить ключ")
+
+        def _test_key():
+            key = key_edit.text().strip()
+            model_name = model_edit.text().strip() or "gpt-4o-mini"
+            if not key:
+                QMessageBox.warning(dlg, "GPT", "Введите API ключ.")
+                return
+            try:
+                try:
+                    from openai import OpenAI
+                except ImportError:
+                    QMessageBox.critical(
+                        dlg,
+                        "GPT",
+                        "Библиотека openai не установлена. Установи её: pip install -r requirements.txt",
+                    )
+                    return
+                try:
+                    client = OpenAI(api_key=key)
+                    client.chat.completions.create(
+                        model=model_name,
+                        messages=[{"role": "user", "content": "ping"}],
+                        max_tokens=5,
+                        temperature=0.0,
+                    )
+                    QMessageBox.information(dlg, "GPT", "Ключ работает.")
+                except Exception as e:
+                    QMessageBox.critical(dlg, "GPT", f"Ошибка проверки: {e}")
+            except Exception as e:
+                QMessageBox.critical(dlg, "GPT", f"Ошибка проверки: {e}")
+
+        test_btn.clicked.connect(_test_key)
+        layout.addRow("", test_btn)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Save | QDialogButtonBox.Cancel)
+        buttons.accepted.connect(dlg.accept)
+        buttons.rejected.connect(dlg.reject)
+        layout.addRow(buttons)
+        if dlg.exec_():
+            self._gpt_api_key = key_edit.text().strip()
+            self._gpt_model = model_edit.text().strip() or "gpt-4o-mini"
+            self._gpt_enabled = enabled_chk.isChecked() and bool(self._gpt_api_key)
+            self._save_gpt_config()
+            self._init_gpt_client()
+            self._apply_gpt_to_widgets()
+
+    def _apply_gpt_to_widgets(self):
+        if self._gpt_client and self._gpt_enabled:
+            self.interpretation_widget.set_llm(self._gpt_client, self._gpt_model, True)
+            self.global_interpretation_widget.set_llm(self._gpt_client, self._gpt_model, True)
+        else:
+            self.interpretation_widget.set_llm(None, None, False)
+            self.global_interpretation_widget.set_llm(None, None, False)
+
+    def _update_analysis_widget(self):
+        """Обновить анализ с учётом режима одиночного крыла"""
+        if self.single_wing_mode:
+            agg_wings, _, _ = self._collect_all_wings()
+            self.analysis_widget.update_statistics(agg_wings if agg_wings else [])
+        else:
+            self.analysis_widget.update_statistics(self.current_image)
+
+    def _collect_all_wings(self):
+        """Собрать все крылья со всех изображений (возвращает wings, width, height)"""
+        wings = []
+        ref_w = ref_h = 0
+        for img in self.images.values():
+            if img and img.wings:
+                needs_calc = img.is_modified or any(getattr(w, "analysis", None) is None for w in img.wings)
+                if needs_calc:
+                    img.analyze_all_wings()
+                wings.extend(img.wings)
+                if ref_w == 0 and img.width:
+                    ref_w, ref_h = img.width, img.height
+        return wings, ref_w, ref_h
+
+    def _update_interpretation_widgets(self):
+        """Обновить интерпретацию (пер-фото и общую)"""
+        # Пер-фото интерпретация
+        self.interpretation_widget.update_interpretation(self.current_image)
+
+        # Общая интерпретация — только если открыта соответствующая вкладка (чтобы избежать тормозов)
+        if self.tab_widget.currentWidget() is self.global_interpretation_widget:
+            self._update_global_interpretation(force=True)
+        else:
+            if self.single_wing_mode:
+                self.global_interpretation_widget.set_message("Режим одиночного крыла: общая интерпретация отключена.")
+            else:
+                self.global_interpretation_widget.set_message("Откройте вкладку \"🌐 Общая интерпретация\" для расчёта.")
+
+    def _update_global_interpretation(self, force: bool = False):
+        """Обновить общую интерпретацию по всем файлам (лениво, только при открытой вкладке)"""
+        if self.single_wing_mode:
+            self.global_interpretation_widget.set_message("Режим одиночного крыла: общая интерпретация отключена.")
+            return
+        if not force and self.tab_widget.currentWidget() is not self.global_interpretation_widget:
+            return
+        self.global_interpretation_widget.update_global(self.images, self.single_wing_mode)
     
     def _save_current(self):
         """Сохранить текущий TPS"""
@@ -1455,29 +1746,7 @@ class MainWindow(QMainWindow):
             return
         
         tps_path = img_data.path.with_suffix('.tps')
-        
-        lines = [f"LM={len(img_data.wings) * NUM_POINTS}"]
-        
-        for wing in img_data.wings:
-            points = wing.get_active_points()
-            for px, py in points:
-                # Инвертируем Y обратно в TPS формат
-                y_tps = img_data.height - py  # TPS/WingsDig: Y отсчитывается снизу
-                # WingsDig сохраняет целые координаты для совместимости с Excel макросом
-                # Округляем до целых, но форматируем с .00000 для совместимости
-                px_rounded = round(px)
-                y_tps_rounded = round(y_tps)
-                coord_str = f"{px_rounded:.5f} {y_tps_rounded:.5f}".replace('.', ',')
-                lines.append(coord_str)
-        
-        lines.append(f"IMAGE={img_data.path.name}")
-        lines.append("ID=1")  # WingsDig использует ID=1
-        
-        # Сохраняем с CRLF переносами строк и завершающим переносом
-        with open(tps_path, 'w', newline='', encoding='utf-8') as f:
-            f.write('\r\n'.join(lines))
-            f.write('\r\n')  # Завершающий перенос строки
-        
+        save_tps_from_image(img_data, tps_path)
         img_data.is_modified = False
     
     def _export_excel(self):

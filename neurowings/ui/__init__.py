@@ -6,12 +6,12 @@ from .graphics_items import PointItem, WingLabelItem, BBoxItem, MeasurementLineI
 from .graphics_view import ZoomableGraphicsView
 from .analysis_widget import AnalysisWidget
 from .graphs_widget import GraphsWidget
-from .interpretation_widget import InterpretationWidget
+from .interpretation_widget import InterpretationWidget, GlobalInterpretationWidget
 from .batch_widget import BatchResultsWidget
 from .dialogs import PointSettingsDialog
 
 __all__ = [
     'PointItem','WingLabelItem','BBoxItem','MeasurementLineItem',
-    'ZoomableGraphicsView','AnalysisWidget','GraphsWidget','InterpretationWidget',
+    'ZoomableGraphicsView','AnalysisWidget','GraphsWidget','InterpretationWidget','GlobalInterpretationWidget',
     'BatchResultsWidget','PointSettingsDialog'
 ]

@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 """
 NeuroWings - Константы и настройки
+Обновлено для models_trained_2025_01_19
 """
 
 from PyQt5.QtGui import QColor
@@ -11,7 +12,7 @@ from PyQt5.QtGui import QColor
 # =============================================================================
 
 APP_NAME = "NeuroWings"
-APP_VERSION = "1.6"
+APP_VERSION = "2.0"  # Обновлено для новых моделей
 APP_AUTHOR = "Dmitry Dubrovskiy"
 NUM_POINTS = 8
 
@@ -75,11 +76,18 @@ YOLO_DET_CONFIDENCE = 0.5
 YOLO_POSE_IMAGE_SIZE = 768
 YOLO_POSE_CONFIDENCE = 0.25
 
-# Stage2 (ResNet) настройки
+# Stage2 (ResNet) настройки - НОВАЯ ЛОГИКА 2025
+# Модель выдаёт прямое смещение в пикселях (не нормализованное)
 STAGE2_CROP_SIZE = 256  # Размер области вокруг точки
-STAGE2_CROP_HALF = 128  # Половина размера области
-STAGE2_ITERATIONS = 2    # Количество итераций уточнения
-STAGE2_MAX_OFFSET = 30   # Максимальное смещение за итерацию (пикселей)
+
+# SubPixel настройки - НОВАЯ МОДЕЛЬ 2025
+SUBPIXEL_CROP_SIZE = 64  # Размер области для SubPixel
+
+# Stage2 настройки для портативной версии (нормализованный выход)
+STAGE2_PORTABLE_CROP_SIZE = 256
+STAGE2_PORTABLE_CROP_HALF = 128
+STAGE2_PORTABLE_ITERATIONS = 2
+STAGE2_PORTABLE_MAX_OFFSET = 30  # пикселей за итерацию
 
 # Отступы для bbox
 BBOX_MARGIN = 20  # Отступ от границ bbox (пикселей)

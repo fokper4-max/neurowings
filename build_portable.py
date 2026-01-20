@@ -3,587 +3,295 @@
 """
 NeuroWings Portable Bundle Builder
 
-Создаёт portable-версию приложения с embedded Python.
-Это самый надёжный способ распространения, так как:
-- Не зависит от установленного Python на машине пользователя
-- Все DLL находятся в правильных относительных путях
-- Нет проблем с PyInstaller и распаковкой во временные папки
+Creates a standalone portable version with embedded Python.
+No system Python installation required on target machine.
 """
 
 import os
 import sys
 import shutil
-import subprocess
-import urllib.request
 import zipfile
+import urllib.request
+import subprocess
 from pathlib import Path
-from typing import Optional
 
-# Конфигурация
-PYTHON_VERSION = "3.11.9"  # Embedded Python версия
-PYTHON_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
-BUILD_DIR = Path(__file__).parent / "build_portable"
-DIST_DIR = Path(__file__).parent / "dist_portable"
-APP_NAME = "NeuroWings"
+# Configuration
+PYTHON_VERSION = "3.11.9"
+PYTHON_EMBED_URL = f"https://www.python.org/ftp/python/{PYTHON_VERSION}/python-{PYTHON_VERSION}-embed-amd64.zip"
+GET_PIP_URL = "https://bootstrap.pypa.io/get-pip.py"
 
-
-def log(message: str) -> None:
-    """Лог с префиксом"""
-    print(f"[BUILD] {message}")
+# Directories
+SCRIPT_DIR = Path(__file__).parent.resolve()
+DIST_DIR = SCRIPT_DIR / "dist_portable"
+BUNDLE_DIR = DIST_DIR / "NeuroWings-Portable"
+APP_DIR = BUNDLE_DIR / "NeuroWings"
 
 
-def download_file(url: str, dest: Path) -> None:
-    """Скачать файл с прогресс-баром"""
+def log(msg: str):
+    """Print log message"""
+    print(f"[BUILD] {msg}")
+
+
+def download_file(url: str, dest: Path) -> bool:
+    """Download file with progress"""
     log(f"Downloading {url}")
-
-    # Try using curl on macOS/Linux (avoids SSL certificate issues)
-    import platform
-    if platform.system() in ['Darwin', 'Linux']:
-        log("Using curl for download (avoids SSL issues on macOS)")
-        result = subprocess.run(['curl', '-L', '-o', str(dest), url], capture_output=True)
-        if result.returncode == 0:
-            log(f"Downloaded to {dest}")
-            return
+    try:
+        if sys.platform != "win32" and shutil.which("curl"):
+            subprocess.run(["curl", "-L", "-o", str(dest), url], check=True)
         else:
-            log("curl failed, falling back to urllib")
-
-    # Fallback to urllib (Windows or if curl failed)
-    def reporthook(block_num, block_size, total_size):
-        downloaded = block_num * block_size
-        if total_size > 0:
-            percent = min(100, downloaded * 100 / total_size)
-            sys.stdout.write(f"\r  Progress: {percent:.1f}% ({downloaded}/{total_size} bytes)")
-            sys.stdout.flush()
-
-    urllib.request.urlretrieve(url, dest, reporthook=reporthook)
-    print()  # Новая строка после прогресс-бара
-    log(f"Downloaded to {dest}")
+            urllib.request.urlretrieve(url, dest)
+        return True
+    except Exception as e:
+        log(f"Download error: {e}")
+        return False
 
 
-def extract_zip(zip_path: Path, dest_dir: Path) -> None:
-    """Распаковать ZIP архив"""
-    log(f"Extracting {zip_path} to {dest_dir}")
-    with zipfile.ZipFile(zip_path, 'r') as zip_ref:
-        zip_ref.extractall(dest_dir)
-    log(f"Extracted {len(zip_ref.namelist())} files")
+def setup_python():
+    """Configure embedded Python"""
+    log("Configuring embedded Python...")
 
+    # Find ._pth file
+    pth_files = list(APP_DIR.glob("python*._pth"))
+    if not pth_files:
+        log("ERROR: ._pth file not found")
+        return False
 
-def setup_python(python_dir: Path) -> None:
-    """Настроить embedded Python для поддержки pip"""
-    log("Setting up embedded Python")
+    pth_file = pth_files[0]
+    log(f"Modifying {pth_file.name}")
 
-    # 1. Разблокировать импорт из site-packages
-    # По умолчанию embedded Python не может импортировать из site-packages
-    pth_file = python_dir / f"python{PYTHON_VERSION.replace('.', '')[:3]}._pth"
+    # Enable site-packages
+    content = pth_file.read_text()
+    content = content.replace("#import site", "import site")
+    if "import site" not in content:
+        content += "\nimport site\n"
+    pth_file.write_text(content)
 
-    if pth_file.exists():
-        log(f"Modifying {pth_file.name}")
-        content = pth_file.read_text()
-        # Раскомментируем строку import site
-        content = content.replace('#import site', 'import site')
-        # Добавляем Lib/site-packages если ещё нет
-        if 'Lib/site-packages' not in content:
-            content += '\nLib/site-packages\n'
-        pth_file.write_text(content)
-        log("Modified ._pth file to enable site-packages")
-    else:
-        log(f"Warning: {pth_file.name} not found, skipping...")
+    # Install pip
+    get_pip = APP_DIR / "get-pip.py"
+    if not download_file(GET_PIP_URL, get_pip):
+        return False
 
-    # 2. Скачать get-pip.py
-    get_pip_url = "https://bootstrap.pypa.io/get-pip.py"
-    get_pip_path = python_dir / "get-pip.py"
-
-    if not get_pip_path.exists():
-        download_file(get_pip_url, get_pip_path)
-
-    # 3. Установить pip
-    python_exe = python_dir / "python.exe"
+    python_exe = APP_DIR / "python.exe"
     log("Installing pip...")
-    subprocess.run(
-        [str(python_exe), str(get_pip_path), "--no-warn-script-location"],
-        check=True,
-        cwd=python_dir
+    result = subprocess.run(
+        [str(python_exe), str(get_pip), "--no-warn-script-location"],
+        cwd=str(APP_DIR),
+        capture_output=True,
+        text=True
     )
-    log("pip installed successfully")
-
-
-def install_dependencies(python_dir: Path, requirements_file: Path) -> None:
-    """Установить зависимости из requirements.txt"""
-    python_exe = python_dir / "python.exe"
-
-    log(f"Installing dependencies from {requirements_file}")
-
-    # Используем pip напрямую с verbose выводом
-    cmd = [
-        str(python_exe),
-        "-m", "pip",
-        "install",
-        "--no-warn-script-location",
-        "--verbose",  # Добавляем verbose для отладки
-        "-r", str(requirements_file)
-    ]
-
-    log(f"Running: {' '.join(cmd)}")
-    log("This may take 5-10 minutes for PyTorch installation...")
-
-    # Запускаем без capture_output чтобы видеть весь процесс
-    result = subprocess.run(cmd, cwd=python_dir)
 
     if result.returncode != 0:
-        raise RuntimeError(f"Failed to install dependencies (exit code: {result.returncode})")
+        log(f"pip install error: {result.stderr}")
+        return False
 
-    log("Dependencies installed successfully")
-
-    # Проверяем что PyTorch установился корректно
-    log("Verifying PyTorch installation...")
-    verify_cmd = [str(python_exe), "-c", "import torch; print(f'PyTorch {torch.__version__} installed at {torch.__file__}')"]
-    verify_result = subprocess.run(verify_cmd, capture_output=True, text=True)
-    if verify_result.returncode == 0:
-        log(f"PyTorch verification: {verify_result.stdout.strip()}")
-    else:
-        log(f"WARNING: PyTorch verification failed: {verify_result.stderr}")
+    get_pip.unlink()
+    return True
 
 
-def copy_project_files(dest_dir: Path) -> None:
-    """Копировать файлы проекта"""
-    log("Copying project files")
+def install_dependencies():
+    """Install Python packages"""
+    log("Installing dependencies...")
 
-    source_dir = Path(__file__).parent
+    python_exe = APP_DIR / "python.exe"
 
-    # Копируем neurowings пакет
-    neurowings_src = source_dir / "neurowings"
-    neurowings_dst = dest_dir / "neurowings"
+    # Install PyTorch CPU first (smaller size)
+    log("Installing PyTorch CPU...")
+    result = subprocess.run([
+        str(python_exe), "-m", "pip", "install",
+        "torch==2.3.1+cpu", "torchvision==0.18.1+cpu",
+        "--index-url", "https://download.pytorch.org/whl/cpu",
+        "--no-warn-script-location"
+    ], capture_output=True, text=True)
 
-    if neurowings_dst.exists():
-        shutil.rmtree(neurowings_dst)
+    if result.returncode != 0:
+        log(f"PyTorch install error: {result.stderr}")
+        return False
+
+    # Install other dependencies
+    packages = [
+        "PyQt5>=5.15.0",
+        "numpy>=1.24.0",
+        "opencv-python>=4.8.0",
+        "ultralytics>=8.0.0",
+        "psutil>=5.9.0",
+        "openai>=1.14.0",
+    ]
+
+    for pkg in packages:
+        log(f"Installing {pkg}...")
+        result = subprocess.run([
+            str(python_exe), "-m", "pip", "install", pkg,
+            "--no-warn-script-location"
+        ], capture_output=True, text=True)
+
+        if result.returncode != 0:
+            log(f"Warning: {pkg} install issue: {result.stderr[:200]}")
+
+    # Verify PyTorch
+    log("Verifying PyTorch...")
+    result = subprocess.run([
+        str(python_exe), "-c", "import torch; print(f'PyTorch {torch.__version__}')"
+    ], capture_output=True, text=True)
+    log(result.stdout.strip() if result.returncode == 0 else "PyTorch verification failed")
+
+    return True
+
+
+def copy_project_files():
+    """Copy project files to bundle"""
+    log("Copying project files...")
+
+    # Copy neurowings package
+    src_neurowings = SCRIPT_DIR / "neurowings"
+    dst_neurowings = APP_DIR / "neurowings"
+
+    if dst_neurowings.exists():
+        shutil.rmtree(dst_neurowings)
 
     shutil.copytree(
-        neurowings_src,
-        neurowings_dst,
-        ignore=shutil.ignore_patterns('__pycache__', '*.pyc', '*.pyo', '.DS_Store')
+        src_neurowings, dst_neurowings,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc", "*.pyo", ".DS_Store")
     )
-    log(f"Copied {neurowings_src} -> {neurowings_dst}")
 
-    # Копируем run.py
-    run_src = source_dir / "run.py"
-    run_dst = dest_dir / "run.py"
-    shutil.copy2(run_src, run_dst)
-    log(f"Copied {run_src} -> {run_dst}")
+    # Copy run.py
+    shutil.copy2(SCRIPT_DIR / "run.py", APP_DIR / "run.py")
 
-    # КРИТИЧНО: Копируем папку models/ с файлами моделей
-    models_src = source_dir / "models"
-    models_dst = dest_dir / "models"
-    if models_src.exists():
-        if models_dst.exists():
-            shutil.rmtree(models_dst)
-        shutil.copytree(
-            models_src,
-            models_dst,
-            ignore=shutil.ignore_patterns('__pycache__', '.DS_Store')
-        )
-        # Подсчитываем размер моделей
-        total_size = sum(f.stat().st_size for f in models_dst.rglob('*') if f.is_file())
-        log(f"Copied {models_src} -> {models_dst} ({total_size / (1024*1024):.1f} MB)")
-    else:
-        log(f"WARNING: models/ folder not found at {models_src}")
-        log("The application will not work without model files!")
+    # Create models directory with README
+    models_dir = APP_DIR / "models"
+    models_dir.mkdir(exist_ok=True)
 
-    # Копируем requirements.txt для справки
-    req_src = source_dir / "requirements.txt"
-    req_dst = dest_dir / "requirements.txt"
-    if req_src.exists():
-        shutil.copy2(req_src, req_dst)
+    readme_content = """Neural network models for NeuroWings v2.0
+
+Required models (place in this folder):
+  - yolo_detect_best.pt     YOLO Detection model
+  - yolo_pose_best.pt       YOLO Pose estimation model
+  - stage2_best.pth         Stage2 Refinement model
+  - stage2_portable.pth     Stage2 Portable model
+  - subpixel_best.pth       SubPixel Refinement model
+
+Download models from the project releases page.
+
+Without models the application will start but neural network
+processing will not be available.
+"""
+    (models_dir / "README.txt").write_text(readme_content, encoding="utf-8")
+
+    log("Project files copied")
+    return True
 
 
-def create_launchers(dest_dir: Path, create_external: bool = False) -> None:
-    """
-    Создать launcher скрипты
+def create_launchers():
+    """Create launcher scripts"""
+    log("Creating launchers...")
 
-    Args:
-        dest_dir: Директория для launcher'ов (если create_external=False - внутри NeuroWings/)
-        create_external: Если True, создать launcher снаружи папки NeuroWings
-    """
-    log("Creating launcher scripts")
+    # Main batch launcher
+    bat_content = '''@echo off
+chcp 65001 >nul
+cd /d "%~dp0"
+set "APP_DIR=%~dp0NeuroWings"
+set "PATH=%APP_DIR%;%APP_DIR%\\Lib\\site-packages\\torch\\lib;%PATH%"
+set "PYTHONPATH=%APP_DIR%"
+set "PYTHONIOENCODING=utf-8"
 
-    if create_external:
-        # Launcher снаружи (dest_dir - это родительская папка, содержащая NeuroWings/)
-        app_folder = "NeuroWings"
-        batch_launcher = dest_dir / f"{APP_NAME}.bat"
-        batch_content = f'''@echo off
-REM NeuroWings Portable Launcher
-REM This launcher runs the application using embedded Python
+echo Starting NeuroWings...
+"%APP_DIR%\\python.exe" "%APP_DIR%\\run.py" %*
 
-setlocal
-
-REM Get script directory (where this .bat file is located)
-set "SCRIPT_DIR=%~dp0"
-cd /d "%SCRIPT_DIR%{app_folder}"
-
-REM Check if Python exists
-if not exist "python.exe" (
-    echo ERROR: python.exe not found in {app_folder} folder!
-    echo Please make sure you extracted the complete {APP_NAME} archive.
-    pause
-    exit /b 1
-)
-
-REM CRITICAL: Add PyTorch DLL paths to system PATH
-REM This fixes "DLL load failed" errors
-set "PATH=%SCRIPT_DIR%{app_folder}\\Lib\\site-packages\\torch\\lib;%PATH%"
-set "PATH=%SCRIPT_DIR%{app_folder}\\Lib\\site-packages\\torchvision;%PATH%"
-
-REM Set Python to find DLLs
-set "PYTHONPATH=%SCRIPT_DIR%{app_folder}"
-
-REM Run application
-echo Starting {APP_NAME}...
-python.exe run.py %*
-
-REM If application crashed, keep window open
 if errorlevel 1 (
     echo.
-    echo {APP_NAME} exited with error code %errorlevel%
-    echo Check {app_folder}\\neurowings.log for details.
+    echo Application exited with error. Check NeuroWings\\neurowings.log
     pause
 )
-
-endlocal
 '''
-    else:
-        # Launcher внутри (старый вариант)
-        batch_launcher = dest_dir / f"{APP_NAME}.bat"
-        batch_content = f'''@echo off
-REM NeuroWings Portable Launcher
-REM This launcher runs the application using embedded Python
+    (BUNDLE_DIR / "NeuroWings.bat").write_text(bat_content, encoding="utf-8")
 
-setlocal
+    # README
+    readme_content = """NeuroWings Portable for Windows
 
-REM Get script directory
-set "SCRIPT_DIR=%~dp0"
-cd /d "%SCRIPT_DIR%"
-
-REM Check if Python exists
-if not exist "python.exe" (
-    echo ERROR: python.exe not found!
-    echo Please make sure you extracted the complete {APP_NAME} archive.
-    pause
-    exit /b 1
-)
-
-REM CRITICAL: Add PyTorch DLL paths to system PATH
-REM This fixes "DLL load failed" errors
-set "PATH=%SCRIPT_DIR%Lib\\site-packages\\torch\\lib;%PATH%"
-set "PATH=%SCRIPT_DIR%Lib\\site-packages\\torchvision;%PATH%"
-
-REM Set Python to find DLLs
-set "PYTHONPATH=%SCRIPT_DIR%"
-
-REM Run application
-echo Starting {APP_NAME}...
-python.exe run.py %*
-
-REM If application crashed, keep window open
-if errorlevel 1 (
-    echo.
-    echo {APP_NAME} exited with error code %errorlevel%
-    echo Check neurowings.log for details.
-    pause
-)
-
-endlocal
-'''
-    batch_launcher.write_text(batch_content, encoding='utf-8')
-    log(f"Created {batch_launcher}")
-
-    # PowerShell launcher (более современный) - НЕ используем, т.к. bat проще
-    # Оставляем только README
-
-    # README для пользователей
-    readme = dest_dir / "README.txt"
-    if create_external:
-        # README снаружи
-        readme_content = f'''{APP_NAME} - Portable Version
-{"=" * 60}
-
-This is a portable (standalone) version of {APP_NAME}.
-It includes its own Python interpreter and all dependencies.
-No installation required!
-
-HOW TO RUN:
------------
-1. Extract this entire archive to any location
-2. Double-click "{APP_NAME}.bat" to start the application
+QUICK START:
+1. Double-click NeuroWings.bat to start
+2. If models are missing, download them and place in NeuroWings/models/
 
 REQUIREMENTS:
-------------
 - Windows 10/11 (64-bit)
 - Visual C++ Redistributable 2015-2022
-  (usually already installed)
-
-  If the application fails to start, download and install:
-  https://aka.ms/vs/17/release/vc_redist.x64.exe
+  (if app doesn't start, install from: https://aka.ms/vs/17/release/vc_redist.x64.exe)
 
 TROUBLESHOOTING:
----------------
-1. If nothing happens when you run the launcher:
-   - Check "{app_folder}\\neurowings.log" file for errors
-   - Make sure you extracted ALL files from the archive
-   - Make sure both {APP_NAME}.bat and {app_folder}/ are in the same folder
+- Check NeuroWings/neurowings.log for errors
+- Ensure models folder contains all required .pt and .pth files
+"""
+    (BUNDLE_DIR / "README.txt").write_text(readme_content, encoding="utf-8")
 
-2. If you see "Models not found" error:
-   - Make sure {app_folder}\\models\\ folder exists with .pt and .pth files
-   - Re-extract the complete archive
-
-3. If you see DLL errors:
-   - Install Visual C++ Redistributable (link above)
-   - Make sure Windows is up to date
-
-FOLDER STRUCTURE:
-----------------
-(After extraction)
-├── {APP_NAME}.bat       (CLICK THIS to start!)
-├── README.txt           (This file)
-└── {app_folder}/
-    ├── python.exe           (Embedded Python interpreter)
-    ├── python311.dll        (Python runtime)
-    ├── Lib/                 (Python standard library)
-    ├── Lib/site-packages/   (Dependencies: PyQt5, PyTorch, etc.)
-    ├── neurowings/          (Application code)
-    ├── models/              (Neural network models - REQUIRED!)
-    │   ├── yolo_detect_best.pt
-    │   ├── yolo_pose_best.pt
-    │   └── stage2_best.pth
-    ├── run.py               (Main entry point)
-    └── neurowings.log       (Created after first run)
-
-LOGS:
------
-The application creates "neurowings.log" in {app_folder}/ folder.
-If you encounter problems, check this file for error messages.
-
-ABOUT:
-------
-{APP_NAME} - Neural Network based Wing Analysis Tool
-Version: Portable Build
-Python: {PYTHON_VERSION} (embedded)
-
-For support and updates, visit:
-[Your repository URL here]
-
-{"=" * 60}
-'''
-    else:
-        # README внутри (старый вариант)
-        readme_content = f'''{APP_NAME} - Portable Version
-{"=" * 60}
-
-This is a portable (standalone) version of {APP_NAME}.
-It includes its own Python interpreter and all dependencies.
-No installation required!
-
-HOW TO RUN:
------------
-1. Extract this entire folder to any location
-2. Double-click "{APP_NAME}.bat" to start the application
-
-REQUIREMENTS:
-------------
-- Windows 10/11 (64-bit)
-- Visual C++ Redistributable 2015-2022
-  (usually already installed)
-
-  If the application fails to start, download and install:
-  https://aka.ms/vs/17/release/vc_redist.x64.exe
-
-TROUBLESHOOTING:
----------------
-1. If nothing happens when you run the launcher:
-   - Check "neurowings.log" file for errors
-   - Make sure you extracted ALL files from the archive
-
-2. If you see "Models not found" error:
-   - Make sure models/ folder exists with .pt and .pth files
-   - Re-extract the complete archive
-
-3. If you see DLL errors:
-   - Install Visual C++ Redistributable (link above)
-   - Make sure Windows is up to date
-
-FOLDER STRUCTURE:
-----------------
-{APP_NAME}/
-├── {APP_NAME}.bat       (CLICK THIS to start!)
-├── README.txt           (This file)
-├── python.exe           (Embedded Python interpreter)
-├── python311.dll        (Python runtime)
-├── Lib/                 (Python standard library)
-├── Lib/site-packages/   (Dependencies: PyQt5, PyTorch, etc.)
-├── neurowings/          (Application code)
-├── models/              (Neural network models - REQUIRED!)
-│   ├── yolo_detect_best.pt
-│   ├── yolo_pose_best.pt
-│   └── stage2_best.pth
-├── run.py               (Main entry point)
-└── neurowings.log       (Created after first run)
-
-LOGS:
------
-The application creates "neurowings.log" in this folder.
-If you encounter problems, check this file for error messages.
-
-ABOUT:
-------
-{APP_NAME} - Neural Network based Wing Analysis Tool
-Version: Portable Build
-Python: {PYTHON_VERSION} (embedded)
-
-For support and updates, visit:
-[Your repository URL here]
-
-{"=" * 60}
-'''
-    readme.write_text(readme_content, encoding='utf-8')
-    log(f"Created {readme}")
+    log("Launchers created")
+    return True
 
 
-def create_zip_archive(source_dir: Path, output_zip: Path, include_parent: bool = True) -> None:
-    """
-    Создать ZIP архив
+def create_zip_archive():
+    """Create ZIP archive"""
+    log("Creating ZIP archive...")
 
-    Args:
-        source_dir: Директория для архивирования (NeuroWings/)
-        output_zip: Путь к выходному ZIP файлу
-        include_parent: Если True, архивировать родительскую папку (launcher снаружи)
-    """
-    log(f"Creating ZIP archive: {output_zip}")
+    zip_path = DIST_DIR / "NeuroWings-Portable-Windows.zip"
 
-    # Удаляем старый архив если существует
-    if output_zip.exists():
-        output_zip.unlink()
+    with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+        for file_path in BUNDLE_DIR.rglob("*"):
+            if file_path.is_file():
+                arcname = file_path.relative_to(DIST_DIR)
+                zf.write(file_path, arcname)
 
-    # Создаём архив
-    with zipfile.ZipFile(output_zip, 'w', zipfile.ZIP_DEFLATED, compresslevel=5) as zipf:
-        if include_parent:
-            # Архивируем родительскую папку (launcher + README снаружи, NeuroWings/ внутри)
-            parent_dir = source_dir.parent
-            for file_path in parent_dir.rglob('*'):
-                if file_path.is_file():
-                    arcname = file_path.relative_to(parent_dir)
-                    zipf.write(file_path, arcname)
-                    # Прогресс каждые 100 файлов
-                    if len(zipf.namelist()) % 100 == 0:
-                        sys.stdout.write(f"\r  Added {len(zipf.namelist())} files...")
-                        sys.stdout.flush()
-        else:
-            # Старый вариант: всё внутри NeuroWings/
-            for file_path in source_dir.rglob('*'):
-                if file_path.is_file():
-                    arcname = file_path.relative_to(source_dir.parent)
-                    zipf.write(file_path, arcname)
-                    # Прогресс каждые 100 файлов
-                    if len(zipf.namelist()) % 100 == 0:
-                        sys.stdout.write(f"\r  Added {len(zipf.namelist())} files...")
-                        sys.stdout.flush()
-
-    print()  # Новая строка
-    file_count = len(zipfile.ZipFile(output_zip, 'r').namelist())
-    size_mb = output_zip.stat().st_size / (1024 * 1024)
-    log(f"Archive created: {file_count} files, {size_mb:.1f} MB")
+    size_mb = zip_path.stat().st_size / (1024 * 1024)
+    log(f"Archive created: {zip_path.name} ({size_mb:.1f} MB)")
+    return True
 
 
-def build_portable() -> None:
-    """Основная функция сборки"""
+def build_portable():
+    """Main build function"""
     log("=" * 60)
-    log(f"Building {APP_NAME} Portable Bundle")
+    log("NeuroWings Portable Builder")
     log("=" * 60)
 
-    # 1. Подготовка директорий
-    log("Step 1: Preparing directories")
-    BUILD_DIR.mkdir(exist_ok=True)
-    DIST_DIR.mkdir(exist_ok=True)
+    # Clean previous build
+    if DIST_DIR.exists():
+        log("Cleaning previous build...")
+        shutil.rmtree(DIST_DIR)
 
-    python_zip = BUILD_DIR / f"python-{PYTHON_VERSION}-embed-amd64.zip"
+    # Create directories
+    APP_DIR.mkdir(parents=True, exist_ok=True)
 
-    # НОВАЯ СТРУКТУРА: создаем промежуточную папку для launcher снаружи
-    release_dir = DIST_DIR / f"{APP_NAME}-Portable"  # Промежуточная папка
-    python_dir = release_dir / APP_NAME              # Папка с Python и приложением
+    # Download Python
+    python_zip = DIST_DIR / "python-embed.zip"
+    if not download_file(PYTHON_EMBED_URL, python_zip):
+        log("ERROR: Failed to download Python")
+        return False
 
-    # 2. Скачать Embedded Python
-    if not python_zip.exists():
-        log("Step 2: Downloading Embedded Python")
-        download_file(PYTHON_URL, python_zip)
-    else:
-        log(f"Step 2: Using cached Python: {python_zip}")
+    # Extract Python
+    log("Extracting Python...")
+    with zipfile.ZipFile(python_zip, "r") as zf:
+        zf.extractall(APP_DIR)
+    python_zip.unlink()
 
-    # 3. Распаковать Python
-    log("Step 3: Extracting Embedded Python")
-    if release_dir.exists():
-        log(f"Cleaning existing directory: {release_dir}")
-        shutil.rmtree(release_dir)
-    python_dir.mkdir(parents=True)
-    extract_zip(python_zip, python_dir)
+    # Setup and install
+    if not setup_python():
+        return False
 
-    # 4. Настроить Python для pip
-    log("Step 4: Setting up Python for pip")
-    setup_python(python_dir)
+    if not install_dependencies():
+        return False
 
-    # 5. Установить зависимости
-    log("Step 5: Installing dependencies")
-    # Используем requirements-portable.txt если существует, иначе requirements.txt
-    requirements_portable = Path(__file__).parent / "requirements-portable.txt"
-    requirements_file = requirements_portable if requirements_portable.exists() else Path(__file__).parent / "requirements.txt"
-    log(f"Using requirements file: {requirements_file.name}")
-    install_dependencies(python_dir, requirements_file)
+    if not copy_project_files():
+        return False
 
-    # 6. Копировать проект
-    log("Step 6: Copying project files")
-    copy_project_files(python_dir)
+    if not create_launchers():
+        return False
 
-    # 7. Создать launchers СНАРУЖИ (в release_dir)
-    log("Step 7: Creating launchers")
-    create_launchers(release_dir, create_external=True)
+    if not create_zip_archive():
+        return False
 
-    # 8. Создать ZIP архив
-    log("Step 8: Creating ZIP archive")
-    output_zip = DIST_DIR / f"{APP_NAME}-Portable-Windows.zip"
-    create_zip_archive(python_dir, output_zip, include_parent=True)
-
-    # 9. Готово!
     log("=" * 60)
     log("BUILD COMPLETE!")
+    log(f"Output: {DIST_DIR}")
     log("=" * 60)
-    log(f"Release folder: {release_dir}")
-    log(f"  - Launcher: {release_dir / f'{APP_NAME}.bat'}")
-    log(f"  - App folder: {python_dir}")
-    log(f"ZIP archive: {output_zip}")
-    log(f"Size: {output_zip.stat().st_size / (1024 * 1024):.1f} MB")
-    log("")
-    log("To test locally:")
-    log(f"  cd {release_dir}")
-    log(f"  {APP_NAME}.bat")
-    log("")
-    log("Structure:")
-    log(f"  {release_dir.name}/")
-    log(f"  +-- {APP_NAME}.bat      (launcher)")
-    log(f"  +-- README.txt")
-    log(f"  +-- {APP_NAME}/")
-    log(f"      +-- python.exe")
-    log(f"      +-- neurowings/")
-    log(f"      +-- models/         (neural network models)")
-    log(f"      +-- run.py")
-    log("")
-    log("To distribute:")
-    log(f"  Share {output_zip}")
+    return True
 
 
 if __name__ == "__main__":
-    try:
-        build_portable()
-    except KeyboardInterrupt:
-        log("\nBuild cancelled by user")
-        sys.exit(1)
-    except Exception as e:
-        log(f"\nBUILD FAILED: {e}")
-        import traceback
-        traceback.print_exc()
-        sys.exit(1)
+    success = build_portable()
+    sys.exit(0 if success else 1)

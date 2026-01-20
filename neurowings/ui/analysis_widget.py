@@ -110,6 +110,8 @@ class AnalysisWidget(QWidget):
     
     def _on_table_clicked(self, row, col):
         """Переход к крылу по клику"""
+        if getattr(self, "aggregate_mode", False):
+            return
         self.goto_wing_signal.emit(row)
     
     def _add_row(self, num, param, value, score=""):
@@ -270,36 +272,42 @@ class AnalysisWidget(QWidget):
         total_score = penalty_not_id + breed_score + ci_score + hi_score + ci_hyb_score + dsa_hyb_score + hi_hyb_score
 
         # Сохраняем результаты
-        if not hasattr(image_data, 'analysis_results'):
-            image_data.analysis_results = {}
+        if not isinstance(image_data, list):
+            if not hasattr(image_data, 'analysis_results'):
+                image_data.analysis_results = {}
 
-        image_data.analysis_results['total'] = total
-        image_data.analysis_results['identified'] = identified
-        image_data.analysis_results['breed_match_pct'] = id_pct
-        image_data.analysis_results['mean_ci'] = mean_ci
-        image_data.analysis_results['alpatov_pct'] = alpatov_pct
-        image_data.analysis_results['mean_dsa'] = mean_dsa
-        image_data.analysis_results['mean_hi'] = mean_hi
-        image_data.analysis_results['breed'] = max_breed if breed_counts[max_breed] > 0 else "—"
-        image_data.analysis_results['score'] = total_score
+            image_data.analysis_results['total'] = total
+            image_data.analysis_results['identified'] = identified
+            image_data.analysis_results['breed_match_pct'] = id_pct
+            image_data.analysis_results['mean_ci'] = mean_ci
+            image_data.analysis_results['alpatov_pct'] = alpatov_pct
+            image_data.analysis_results['mean_dsa'] = mean_dsa
+            image_data.analysis_results['mean_hi'] = mean_hi
+            image_data.analysis_results['breed'] = max_breed if breed_counts[max_breed] > 0 else "—"
+            image_data.analysis_results['score'] = total_score
 
-    def update_statistics(self, image_data: ImageData):
-        """Обновить статистику для изображения"""
+    def update_statistics(self, image_data):
+        """Обновить статистику для изображения или списка крыльев"""
         self.current_data = image_data
+        self.aggregate_mode = isinstance(image_data, list)
+        aggregate_mode = isinstance(image_data, list)
         self.analysis_table.setRowCount(0)
         self.results_table.setRowCount(0)
         
-        if not image_data or not image_data.wings:
+        if (not image_data) or (not aggregate_mode and not image_data.wings) or (aggregate_mode and len(image_data) == 0):
             # Очищаем таблицы, если нет данных
             self.analysis_table.setRowCount(0)
             self.results_table.setRowCount(0)
             return
         
-        wings = image_data.wings
-        total = len(wings)
-        
-        # Пересчитываем анализ для всех крыльев
-        image_data.analyze_all_wings()
+        if aggregate_mode:
+            wings = image_data
+            total = len(wings)
+        else:
+            wings = image_data.wings
+            total = len(wings)
+            # Пересчитываем анализ для всех крыльев
+            image_data.analyze_all_wings()
         
         # Собираем данные по ВСЕМ крыльям (как в Excel)
         # Excel рассчитывает средние для всех крыльев, не только для идентифицированных
@@ -515,28 +523,41 @@ class AnalysisWidget(QWidget):
             self.graphs_widget.update_graphs(ci_values, dsa_values, hi_values, wing_numbers)
         
         # Таблица результатов по крыльям
-        self.results_table.setRowCount(total)
-        for i, wing in enumerate(wings):
-            if not wing.analysis:
-                continue
-            
-            a = wing.analysis
-            alpatov = ci_to_alpatov(a.CI) * 100
-            
-            self.results_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
-            self.results_table.setItem(i, 1, QTableWidgetItem(f"{a.CI:.3f}"))
-            self.results_table.setItem(i, 2, QTableWidgetItem(f"{alpatov:.1f}%"))
-            self.results_table.setItem(i, 3, QTableWidgetItem(f"{a.DsA:.3f}"))
-            self.results_table.setItem(i, 4, QTableWidgetItem(f"{a.HI:.3f}"))
-            self.results_table.setItem(i, 5, QTableWidgetItem(", ".join(a.breeds) if a.breeds else "—"))
-            
-            status = "✅" if a.is_identified else "❌"
-            status_item = QTableWidgetItem(status)
-            if not a.is_identified:
-                status_item.setBackground(QColor(80, 40, 40))
-            else:
-                status_item.setBackground(QColor(40, 80, 40))
-            self.results_table.setItem(i, 6, status_item)
+        if aggregate_mode:
+            # Одна строка со средними значениями
+            self.results_table.setRowCount(1)
+            self.results_table.setItem(0, 0, QTableWidgetItem("—"))
+            self.results_table.setItem(0, 1, QTableWidgetItem(f"{mean_ci:.3f}"))
+            self.results_table.setItem(0, 2, QTableWidgetItem(f"{alpatov_pct:.1f}%"))
+            self.results_table.setItem(0, 3, QTableWidgetItem(f"{mean_dsa:.3f}"))
+            self.results_table.setItem(0, 4, QTableWidgetItem(f"{mean_hi:.3f}"))
+            self.results_table.setItem(0, 5, QTableWidgetItem(", ".join([b for b,c in breed_counts.items() if c>0]) or "—"))
+            status_item = QTableWidgetItem("—")
+            status_item.setBackground(QColor(60, 60, 60))
+            self.results_table.setItem(0, 6, status_item)
+        else:
+            self.results_table.setRowCount(total)
+            for i, wing in enumerate(wings):
+                if not wing.analysis:
+                    continue
+                
+                a = wing.analysis
+                alpatov = ci_to_alpatov(a.CI) * 100
+                
+                self.results_table.setItem(i, 0, QTableWidgetItem(str(i + 1)))
+                self.results_table.setItem(i, 1, QTableWidgetItem(f"{a.CI:.3f}"))
+                self.results_table.setItem(i, 2, QTableWidgetItem(f"{alpatov:.1f}%"))
+                self.results_table.setItem(i, 3, QTableWidgetItem(f"{a.DsA:.3f}"))
+                self.results_table.setItem(i, 4, QTableWidgetItem(f"{a.HI:.3f}"))
+                self.results_table.setItem(i, 5, QTableWidgetItem(", ".join(a.breeds) if a.breeds else "—"))
+                
+                status = "✅" if a.is_identified else "❌"
+                status_item = QTableWidgetItem(status)
+                if not a.is_identified:
+                    status_item.setBackground(QColor(80, 40, 40))
+                else:
+                    status_item.setBackground(QColor(40, 80, 40))
+                self.results_table.setItem(i, 6, status_item)
         
         # Принудительное обновление таблиц для перерисовки
         self.analysis_table.update()
