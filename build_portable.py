@@ -107,14 +107,17 @@ def install_dependencies():
         log(f"PyTorch install error: {result.stderr}")
         return False
 
-    # Install other dependencies
+    # Install other dependencies (order matters!)
+    # Skip heavy packages: matplotlib, pandas, seaborn, scipy
     packages = [
-        "PyQt5>=5.15.0",
-        "numpy>=1.24.0",
-        "opencv-python>=4.8.0",
-        "ultralytics>=8.0.0",
-        "psutil>=5.9.0",
+        "PyQt5==5.15.10",
+        "numpy==1.26.4",
+        "opencv-python-headless==4.9.0.80",
+        "psutil==5.9.8",
         "openai>=1.14.0",
+        "pyyaml>=6.0",
+        "tqdm>=4.64.0",
+        "pillow>=7.1.2",
     ]
 
     for pkg in packages:
@@ -126,6 +129,13 @@ def install_dependencies():
 
         if result.returncode != 0:
             log(f"Warning: {pkg} install issue: {result.stderr[:200]}")
+
+    # Install ultralytics WITHOUT dependencies (use already installed torch)
+    log("Installing ultralytics (no-deps)...")
+    subprocess.run([
+        str(python_exe), "-m", "pip", "install",
+        "ultralytics>=8.0.0", "--no-deps", "--no-warn-script-location"
+    ], capture_output=True, text=True)
 
     # Verify PyTorch
     log("Verifying PyTorch...")
