@@ -1,11 +1,16 @@
-# Requirements for Portable Bundle (~400 MB total)
+# Requirements for Portable Bundle (CPU-only, ~300 MB)
 
+# PyTorch CPU-only FIRST (before ultralytics)
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.0.1+cpu
+torchvision==0.15.2+cpu
+
+# Core dependencies
 PyQt5==5.15.10
 numpy==1.26.4
 opencv-python-headless==4.9.0.80
 psutil==5.9.8
+openai>=1.14.0
 
-# PyTorch CPU-only 2.0 (smaller than 2.2)
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.0.1+cpu
-torchvision==0.15.2+cpu
+# Ultralytics (will use already installed CPU torch)
+ultralytics>=8.0.0
