@@ -94,11 +94,11 @@ def install_dependencies():
 
     python_exe = APP_DIR / "python.exe"
 
-    # Install PyTorch CPU first (smaller size)
-    log("Installing PyTorch CPU...")
+    # Install PyTorch CPU 2.0.1 (smaller than 2.3.x)
+    log("Installing PyTorch CPU 2.0.1...")
     result = subprocess.run([
         str(python_exe), "-m", "pip", "install",
-        "torch==2.3.1+cpu", "torchvision==0.18.1+cpu",
+        "torch==2.0.1+cpu", "torchvision==0.15.2+cpu",
         "--index-url", "https://download.pytorch.org/whl/cpu",
         "--no-warn-script-location"
     ], capture_output=True, text=True)
@@ -144,6 +144,39 @@ def install_dependencies():
     ], capture_output=True, text=True)
     log(result.stdout.strip() if result.returncode == 0 else "PyTorch verification failed")
 
+    # Clean up unnecessary files to reduce size
+    log("Cleaning up unnecessary files...")
+    site_packages = APP_DIR / "Lib" / "site-packages"
+
+    # Patterns to delete
+    cleanup_patterns = [
+        "*.dist-info",
+        "__pycache__",
+        "*.pdb",
+        "tests",
+        "test",
+        "testing",
+        "docs",
+        "doc",
+        "examples",
+        "benchmarks",
+    ]
+
+    deleted_size = 0
+    for pattern in cleanup_patterns:
+        for path in site_packages.rglob(pattern):
+            try:
+                if path.is_dir():
+                    size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
+                    shutil.rmtree(path)
+                    deleted_size += size
+                elif path.is_file():
+                    deleted_size += path.stat().st_size
+                    path.unlink()
+            except Exception:
+                pass
+
+    log(f"Cleaned up {deleted_size / (1024*1024):.1f} MB")
     return True
 
 
