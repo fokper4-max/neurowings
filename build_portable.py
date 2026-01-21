@@ -144,37 +144,56 @@ def install_dependencies():
     ], capture_output=True, text=True)
     log(result.stdout.strip() if result.returncode == 0 else "PyTorch verification failed")
 
-    # Clean up unnecessary files to reduce size
-    log("Cleaning up unnecessary files...")
+    # Aggressive cleanup to minimize size
+    log("Aggressive cleanup...")
     site_packages = APP_DIR / "Lib" / "site-packages"
-
-    # Patterns to delete
-    cleanup_patterns = [
-        "*.dist-info",
-        "__pycache__",
-        "*.pdb",
-        "tests",
-        "test",
-        "testing",
-        "docs",
-        "doc",
-        "examples",
-        "benchmarks",
-    ]
-
     deleted_size = 0
-    for pattern in cleanup_patterns:
-        for path in site_packages.rglob(pattern):
-            try:
-                if path.is_dir():
-                    size = sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
-                    shutil.rmtree(path)
-                    deleted_size += size
-                elif path.is_file():
-                    deleted_size += path.stat().st_size
-                    path.unlink()
-            except Exception:
-                pass
+
+    def delete_path(p):
+        nonlocal deleted_size
+        try:
+            if p.is_dir():
+                for f in p.rglob("*"):
+                    if f.is_file():
+                        deleted_size += f.stat().st_size
+                shutil.rmtree(p)
+            elif p.is_file():
+                deleted_size += p.stat().st_size
+                p.unlink()
+        except:
+            pass
+
+    # General cleanup patterns
+    for pattern in ["*.dist-info", "__pycache__", "*.pdb", "tests", "test", "docs", "examples"]:
+        for p in site_packages.rglob(pattern):
+            delete_path(p)
+
+    # PyTorch specific cleanup (remove CUDA stubs, unused backends)
+    torch_dir = site_packages / "torch"
+    if torch_dir.exists():
+        # Remove CUDA/cuDNN related (not needed for CPU)
+        for name in ["cuda", "cudnn", "nccl", "nvfuser", "backends/cudnn", "backends/cuda"]:
+            p = torch_dir / name
+            if p.exists():
+                delete_path(p)
+
+        # Remove large unused modules
+        for name in ["_inductor", "onnx", "distributed", "testing", "utils/benchmark"]:
+            p = torch_dir / name
+            if p.exists():
+                delete_path(p)
+
+        # Remove .pdb debug files
+        for p in torch_dir.rglob("*.pdb"):
+            delete_path(p)
+
+    # Torchvision cleanup
+    tv_dir = site_packages / "torchvision"
+    if tv_dir.exists():
+        for name in ["datasets", "io/image.py"]:  # datasets not needed
+            p = tv_dir / name
+            if p.exists():
+                delete_path(p)
 
     log(f"Cleaned up {deleted_size / (1024*1024):.1f} MB")
     return True
