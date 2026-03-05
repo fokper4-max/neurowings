@@ -3,7 +3,7 @@
 param(
     [string]$RepositoryUrl = "https://github.com/fokper4-max/neurowings.git",
     [string]$Branch = "main",
-    [string]$RepositoryPath = "C:\Build\NeuroWings",
+    [string]$RepositoryPath = "$env:ProgramData\NeuroWingsBuilder\repo\NeuroWings",
     [string]$StateDir = "$env:ProgramData\NeuroWingsBuilder",
     [int]$PollMinutes = 60,
     [switch]$BuildSetup,
