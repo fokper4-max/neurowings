@@ -167,14 +167,30 @@ def sftp_mkdir_p(sftp, remote_dir: str) -> None:
 
 def sftp_upload_bytes(sftp, remote_path: str, payload: bytes) -> None:
     temp_path = f"{remote_path}.tmp"
+    try:
+        sftp.remove(temp_path)
+    except OSError:
+        pass
     with sftp.file(temp_path, "wb") as remote_file:
         remote_file.write(payload)
+    try:
+        sftp.remove(remote_path)
+    except OSError:
+        pass
     sftp.rename(temp_path, remote_path)
 
 
 def sftp_upload_file(sftp, local_path: Path, remote_path: str) -> None:
     temp_path = f"{remote_path}.tmp"
+    try:
+        sftp.remove(temp_path)
+    except OSError:
+        pass
     sftp.put(str(local_path), temp_path)
+    try:
+        sftp.remove(remote_path)
+    except OSError:
+        pass
     sftp.rename(temp_path, remote_path)
 
 
