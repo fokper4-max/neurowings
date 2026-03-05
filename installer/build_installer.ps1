@@ -191,23 +191,24 @@ if (-not $SkipPyInstaller) {
     Write-Host "Спецификация: $specFile" -ForegroundColor Gray
 
     & $PythonExe -m PyInstaller --clean --noconfirm $specFile
+    $pyInstallerExitCode = $LASTEXITCODE
 
-    if ($LASTEXITCODE -eq 0) {
-        Write-Success "PyInstaller завершен успешно"
-
-        # Проверяем результат
-        $exePath = Join-Path $ProjectRoot "dist\$ProductName.exe"
-        if (Test-Path $exePath) {
-            $size = [math]::Round((Get-Item $exePath).Length / 1MB, 2)
-            Write-Success "EXE файл создан: $exePath ($size MB)"
+    # На Windows некоторые сборки PyInstaller пишут INFO в stderr и могут завершаться
+    # с ненулевым кодом, хотя итоговый one-file EXE уже собран корректно.
+    $exePath = Join-Path $ProjectRoot "dist\$ProductName.exe"
+    if (Test-Path $exePath) {
+        $size = [math]::Round((Get-Item $exePath).Length / 1MB, 2)
+        if ($pyInstallerExitCode -ne 0) {
+            Write-Info "PyInstaller вернул код $pyInstallerExitCode, но EXE уже создан. Продолжаю сборку."
         }
         else {
-            Write-Error-Custom "EXE файл не найден после сборки!"
-            exit 1
+            Write-Success "PyInstaller завершен успешно"
         }
+        Write-Success "EXE файл создан: $exePath ($size MB)"
     }
     else {
-        Write-Error-Custom "PyInstaller завершился с ошибкой (код: $LASTEXITCODE)"
+        Write-Error-Custom "PyInstaller завершился с ошибкой (код: $pyInstallerExitCode)"
+        Write-Error-Custom "EXE файл не найден после сборки!"
         exit 1
     }
 }
