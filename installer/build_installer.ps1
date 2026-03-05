@@ -52,6 +52,16 @@ function Resolve-PythonExe {
     throw "Python не найден: $Candidate"
 }
 
+function Test-PythonModule {
+    param(
+        [string]$PythonExePath,
+        [string]$ModuleName
+    )
+    $cmd = "import importlib.util; import sys; sys.exit(0 if importlib.util.find_spec('$ModuleName') else 1)"
+    & $PythonExePath -c $cmd
+    return ($LASTEXITCODE -eq 0)
+}
+
 function Get-InstallerVersion {
     param([string]$NsiPath)
     $content = Get-Content $NsiPath -Raw -Encoding UTF8
@@ -85,8 +95,8 @@ catch {
 }
 
 # Проверка PyInstaller
-$pyinstallerVersion = & $PythonExe -m PyInstaller --version 2>&1
-if ($LASTEXITCODE -eq 0) {
+if (Test-PythonModule -PythonExePath $PythonExe -ModuleName "PyInstaller") {
+    $pyinstallerVersion = & $PythonExe -m PyInstaller --version 2>&1
     Write-Success "PyInstaller найден: $pyinstallerVersion"
 }
 else {
