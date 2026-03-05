@@ -84,15 +84,15 @@ $PythonExe = Resolve-PythonExe -Candidate $PythonExe
 
 if (-not $SkipBuild) {
     Write-Step "Сборка релиза"
-    $buildArgs = @()
-    if ($SkipDownload) { $buildArgs += "-SkipDownload" }
-    if ($SkipPyInstaller) { $buildArgs += "-SkipPyInstaller" }
-    if ($SkipNSIS) { $buildArgs += "-SkipNSIS" }
-    if ($Clean) { $buildArgs += "-Clean" }
+    $buildParams = @{
+        PythonExe = $PythonExe
+    }
+    if ($SkipDownload) { $buildParams.SkipDownload = $true }
+    if ($SkipPyInstaller) { $buildParams.SkipPyInstaller = $true }
+    if ($SkipNSIS) { $buildParams.SkipNSIS = $true }
+    if ($Clean) { $buildParams.Clean = $true }
 
-    $buildArgs += @("-PythonExe", $PythonExe)
-
-    & (Join-Path $PSScriptRoot "build_installer.ps1") @buildArgs
+    & (Join-Path $PSScriptRoot "build_installer.ps1") @buildParams
     if ($LASTEXITCODE -ne 0) {
         throw "Сборка завершилась ошибкой."
     }
