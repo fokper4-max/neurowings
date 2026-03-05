@@ -132,9 +132,11 @@ function Normalize-InstallerScriptEncoding {
 
 function Get-LatestGitAssetUrl {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ "User-Agent" = "NeuroWingsBuilder" }
-    $asset = $release.assets | Where-Object { $_.name -eq "MinGit-64-bit.zip" } | Select-Object -First 1
+    $asset = $release.assets | Where-Object {
+        $_.name -match '^MinGit-.*-64-bit\.zip$' -and $_.name -notmatch 'busybox'
+    } | Select-Object -First 1
     if ($null -eq $asset) {
-        throw "Не удалось найти MinGit-64-bit.zip в последнем релизе git-for-windows."
+        throw "Не удалось найти 64-bit MinGit архив в последнем релизе git-for-windows."
     }
     return $asset.browser_download_url
 }
