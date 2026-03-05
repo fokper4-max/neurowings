@@ -50,17 +50,7 @@ function Get-PlainTextFromEncryptedFile {
     if (-not (Test-Path $Path)) {
         throw "Файл с зашифрованным паролем не найден: $Path"
     }
-    $encrypted = Get-Content $Path -Raw -Encoding UTF8
-    $secure = ConvertTo-SecureString $encrypted
-    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
-    try {
-        return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
-    }
-    finally {
-        if ($bstr -ne [IntPtr]::Zero) {
-            [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr)
-        }
-    }
+    return (Get-Content $Path -Raw -Encoding UTF8).Trim()
 }
 
 function Get-AppVersion {

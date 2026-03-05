@@ -195,7 +195,9 @@ function Save-EncryptedSecret {
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    $SecureString | ConvertFrom-SecureString | Set-Content -Path $Path -Encoding UTF8
+    $plain = Convert-SecureToPlain -SecureString $SecureString
+    Set-Content -Path $Path -Value $plain -Encoding UTF8
+    & icacls.exe $Path /inheritance:r /grant:r "Administrators:F" "SYSTEM:F" | Out-Null
 }
 
 Write-Step "Проверка окружения"
