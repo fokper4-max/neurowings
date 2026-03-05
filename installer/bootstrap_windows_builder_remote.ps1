@@ -16,6 +16,15 @@ $stateDir = "C:\ProgramData\NeuroWingsBuilder"
 $bootstrapPath = Join-Path $env:TEMP "setup_windows_builder.ps1"
 $logPath = Join-Path $stateDir "bootstrap.log"
 
+function Write-Utf8BomFile {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8Bom)
+}
+
 function Send-Marker {
     param(
         [string]$Stage,
@@ -46,7 +55,8 @@ New-Item -ItemType Directory -Path $stateDir -Force | Out-Null
 Send-Marker -Stage "start"
 
 try {
-    Invoke-WebRequest -UseBasicParsing $BootstrapScriptUrl -OutFile $bootstrapPath
+    $bootstrapContent = (Invoke-WebRequest -UseBasicParsing $BootstrapScriptUrl).Content
+    Write-Utf8BomFile -Path $bootstrapPath -Content $bootstrapContent
     Send-Marker -Stage "downloaded"
 
     & powershell.exe -NoProfile -ExecutionPolicy Bypass -File $bootstrapPath `

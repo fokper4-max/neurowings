@@ -109,6 +109,27 @@ function Invoke-DownloadFile {
     Invoke-WebRequest -Uri $Url -OutFile $DestinationPath -UseBasicParsing
 }
 
+function Write-Utf8BomFile {
+    param(
+        [string]$Path,
+        [string]$Content
+    )
+    $utf8Bom = New-Object System.Text.UTF8Encoding($true)
+    [System.IO.File]::WriteAllText($Path, $Content, $utf8Bom)
+}
+
+function Normalize-InstallerScriptEncoding {
+    param([string]$RepositoryRoot)
+    $installerDir = Join-Path $RepositoryRoot "installer"
+    if (-not (Test-Path $installerDir)) {
+        return
+    }
+    Get-ChildItem -Path $installerDir -Filter "*.ps1" -File | ForEach-Object {
+        $content = Get-Content $_.FullName -Raw -Encoding UTF8
+        Write-Utf8BomFile -Path $_.FullName -Content $content
+    }
+}
+
 function Get-LatestGitAssetUrl {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ "User-Agent" = "NeuroWingsBuilder" }
     $asset = $release.assets | Where-Object { $_.name -eq "MinGit-64-bit.zip" } | Select-Object -First 1
@@ -238,6 +259,7 @@ else {
 if ($LASTEXITCODE -ne 0) {
     throw "git pull завершился с ошибкой."
 }
+Normalize-InstallerScriptEncoding -RepositoryRoot $RepositoryPath
 Write-Success "Репозиторий синхронизирован"
 
 Write-Step "Сохранение конфигурации"
