@@ -130,6 +130,18 @@ function Normalize-InstallerScriptEncoding {
     }
 }
 
+function Reset-InstallerScriptWorkingTree {
+    param(
+        [string]$RepositoryRoot,
+        [string]$GitExe
+    )
+    $installerDir = Join-Path $RepositoryRoot "installer"
+    if (-not (Test-Path $installerDir)) {
+        return
+    }
+    & $GitExe -C $RepositoryRoot checkout -- "installer/*.ps1" 2>$null | Out-Null
+}
+
 function Get-LatestGitAssetUrl {
     $release = Invoke-RestMethod -Uri "https://api.github.com/repos/git-for-windows/git/releases/latest" -Headers @{ "User-Agent" = "NeuroWingsBuilder" }
     $asset = $release.assets | Where-Object {
@@ -248,6 +260,7 @@ elseif (-not (Test-Path (Join-Path $RepositoryPath ".git"))) {
     throw "Папка $RepositoryPath уже существует, но это не git-репозиторий."
 }
 else {
+    Reset-InstallerScriptWorkingTree -RepositoryRoot $RepositoryPath -GitExe $gitExe
     & $gitExe -C $RepositoryPath remote set-url origin $RepositoryUrl
     & $gitExe -C $RepositoryPath fetch origin
     if ($LASTEXITCODE -ne 0) {

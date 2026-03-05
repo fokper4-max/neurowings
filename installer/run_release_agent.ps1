@@ -66,6 +66,18 @@ function Normalize-InstallerScriptEncoding {
     }
 }
 
+function Reset-InstallerScriptWorkingTree {
+    param(
+        [string]$RepositoryRoot,
+        [string]$GitExe
+    )
+    $installerDir = Join-Path $RepositoryRoot "installer"
+    if (-not (Test-Path $installerDir)) {
+        return
+    }
+    & $GitExe -C $RepositoryRoot checkout -- "installer/*.ps1" 2>$null | Out-Null
+}
+
 function Get-PlainTextFromEncryptedFile {
     param([string]$Path)
     if (-not (Test-Path $Path)) {
@@ -183,6 +195,7 @@ function Run-Agent {
         }
     }
 
+    Reset-InstallerScriptWorkingTree -RepositoryRoot $config.RepositoryPath -GitExe $gitExe
     & $gitExe -C $config.RepositoryPath config core.longpaths true | Out-Null
     & $gitExe -C $config.RepositoryPath fetch origin $config.Branch
     if ($LASTEXITCODE -ne 0) {
