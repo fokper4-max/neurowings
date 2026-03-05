@@ -12,6 +12,7 @@ param(
 #Requires -RunAsAdministrator
 
 $ErrorActionPreference = "Stop"
+$env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $ProductName = "НейроКрылья"
 $InstallerVersion = $null
 
@@ -101,7 +102,7 @@ if (Test-PythonModule -PythonExePath $PythonExe -ModuleName "PyInstaller") {
 }
 else {
     Write-Info "PyInstaller не найден, устанавливаем..."
-    & $PythonExe -m pip install pyinstaller
+    & $PythonExe -m pip install --no-warn-script-location pyinstaller
     if ($LASTEXITCODE -ne 0) {
         Write-Error-Custom "Не удалось установить PyInstaller"
         exit 1
@@ -164,7 +165,7 @@ Write-Step "4. Установка зависимостей Python"
 $requirementsFile = Join-Path $ProjectRoot "requirements.txt"
 if (Test-Path $requirementsFile) {
     Write-Info "Установка зависимостей из requirements.txt..."
-    & $PythonExe -m pip install -r $requirementsFile
+    & $PythonExe -m pip install --no-warn-script-location -r $requirementsFile
     if ($LASTEXITCODE -ne 0) {
         Write-Error-Custom "Не удалось установить зависимости Python"
         exit 1

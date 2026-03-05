@@ -20,6 +20,7 @@ param(
 #Requires -RunAsAdministrator
 
 $ErrorActionPreference = "Stop"
+$env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $ProjectRoot
 
@@ -73,7 +74,7 @@ function Ensure-PythonModule {
     & $PythonExePath -c $cmd
     if ($LASTEXITCODE -ne 0) {
         Write-Info "Устанавливаю Python пакет $ModuleName..."
-        & $PythonExePath -m pip install $ModuleName
+        & $PythonExePath -m pip install --no-warn-script-location $ModuleName
         if ($LASTEXITCODE -ne 0) {
             throw "Не удалось установить модуль $ModuleName"
         }
