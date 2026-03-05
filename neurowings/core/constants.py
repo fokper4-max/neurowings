@@ -13,7 +13,11 @@ from PyQt5.QtGui import QColor
 
 APP_NAME = "НейроКрылья"
 APP_VERSION = "2.0"  # Обновлено для новых моделей
-APP_AUTHOR = "Dmitry Dubrovskiy"
+APP_AUTHOR = "Дмитрий Дубровский"
+APP_MAX_URL = "https://max.ru/u/f9LHodD0cOIbZcReW1B_n2lDumCww_8mo2-Kjv_3dok65ZPHlJWUNkq-MVo"
+APP_TELEGRAM_LABEL = "@NeuroWings_bee"
+APP_TELEGRAM_URL = "https://t.me/NeuroWings_bee"
+APP_UPDATE_FEED_URL = "https://193-124-117-175.nip.io/downloads/neurowings/update-feed.json"
 NUM_POINTS = 8
 
 # =============================================================================

@@ -5,13 +5,15 @@ param(
     [switch]$SkipDownload,      # Пропустить загрузку redistributables
     [switch]$SkipPyInstaller,   # Пропустить PyInstaller
     [switch]$SkipNSIS,          # Пропустить NSIS
-    [switch]$Clean              # Очистить старые сборки перед началом
+    [switch]$Clean,             # Очистить старые сборки перед началом
+    [string]$PythonExe = "python"
 )
 
 #Requires -RunAsAdministrator
 
 $ErrorActionPreference = "Stop"
 $ProductName = "НейроКрылья"
+$InstallerVersion = $null
 
 # Цвета для вывода
 function Write-Step {
@@ -38,6 +40,28 @@ function Write-Info {
     Write-Host "[*] $Message" -ForegroundColor Yellow
 }
 
+function Resolve-PythonExe {
+    param([string]$Candidate)
+    if (Test-Path $Candidate) {
+        return (Resolve-Path $Candidate).Path
+    }
+    $command = Get-Command $Candidate -ErrorAction SilentlyContinue
+    if ($command) {
+        return $command.Source
+    }
+    throw "Python не найден: $Candidate"
+}
+
+function Get-InstallerVersion {
+    param([string]$NsiPath)
+    $content = Get-Content $NsiPath -Raw -Encoding UTF8
+    $match = [regex]::Match($content, '!define\s+PRODUCT_VERSION\s+"([^"]+)"')
+    if (-not $match.Success) {
+        throw "Не удалось определить PRODUCT_VERSION из $NsiPath"
+    }
+    return $match.Groups[1].Value
+}
+
 # Переходим в корневую директорию проекта
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $ProjectRoot
@@ -51,7 +75,8 @@ Write-Step "1. Проверка окружения"
 
 # Проверка Python
 try {
-    $pythonVersion = python --version 2>&1
+    $PythonExe = Resolve-PythonExe -Candidate $PythonExe
+    $pythonVersion = & $PythonExe --version 2>&1
     Write-Success "Python найден: $pythonVersion"
 }
 catch {
@@ -60,25 +85,33 @@ catch {
 }
 
 # Проверка PyInstaller
-try {
-    $pyinstallerVersion = pyinstaller --version 2>&1
+$pyinstallerVersion = & $PythonExe -m PyInstaller --version 2>&1
+if ($LASTEXITCODE -eq 0) {
     Write-Success "PyInstaller найден: $pyinstallerVersion"
 }
-catch {
+else {
     Write-Info "PyInstaller не найден, устанавливаем..."
-    pip install pyinstaller
+    & $PythonExe -m pip install pyinstaller
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error-Custom "Не удалось установить PyInstaller"
+        exit 1
+    }
     Write-Success "PyInstaller установлен"
 }
 
-# Проверка NSIS
 $nsisPath = "C:\Program Files (x86)\NSIS\makensis.exe"
-if (Test-Path $nsisPath) {
-    Write-Success "NSIS найден: $nsisPath"
+if (-not $SkipNSIS) {
+    if (Test-Path $nsisPath) {
+        Write-Success "NSIS найден: $nsisPath"
+    }
+    else {
+        Write-Error-Custom "NSIS не найден! Установите NSIS 3.x с https://nsis.sourceforge.io/"
+        Write-Info "После установки перезапустите скрипт"
+        exit 1
+    }
 }
 else {
-    Write-Error-Custom "NSIS не найден! Установите NSIS 3.x с https://nsis.sourceforge.io/"
-    Write-Info "После установки перезапустите скрипт"
-    exit 1
+    Write-Info "NSIS не требуется (--SkipNSIS)"
 }
 
 # Очистка старых сборок
@@ -121,7 +154,11 @@ Write-Step "4. Установка зависимостей Python"
 $requirementsFile = Join-Path $ProjectRoot "requirements.txt"
 if (Test-Path $requirementsFile) {
     Write-Info "Установка зависимостей из requirements.txt..."
-    pip install -r $requirementsFile
+    & $PythonExe -m pip install -r $requirementsFile
+    if ($LASTEXITCODE -ne 0) {
+        Write-Error-Custom "Не удалось установить зависимости Python"
+        exit 1
+    }
     Write-Success "Зависимости установлены"
 }
 else {
@@ -142,7 +179,7 @@ if (-not $SkipPyInstaller) {
     Write-Info "Запуск PyInstaller..."
     Write-Host "Спецификация: $specFile" -ForegroundColor Gray
 
-    pyinstaller --clean --noconfirm $specFile
+    & $PythonExe -m PyInstaller --clean --noconfirm $specFile
 
     if ($LASTEXITCODE -eq 0) {
         Write-Success "PyInstaller завершен успешно"
@@ -215,6 +252,7 @@ if (-not $SkipNSIS) {
 
     Write-Info "Запуск NSIS..."
     Write-Host "Скрипт: $nsiScript" -ForegroundColor Gray
+    $InstallerVersion = Get-InstallerVersion -NsiPath $nsiScript
 
     & $nsisPath $nsiScript
 
@@ -222,7 +260,7 @@ if (-not $SkipNSIS) {
         Write-Success "NSIS компиляция завершена успешно"
 
         # Проверяем результат
-        $installerPath = Join-Path $ProjectRoot "dist\$ProductName-2.0-Setup.exe"
+        $installerPath = Join-Path $ProjectRoot "dist\$ProductName-$InstallerVersion-Setup.exe"
         if (Test-Path $installerPath) {
             $size = [math]::Round((Get-Item $installerPath).Length / 1MB, 2)
             Write-Success "Инсталлятор создан: $installerPath ($size MB)"

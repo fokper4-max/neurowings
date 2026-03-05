@@ -4,17 +4,27 @@
 NeuroWings - Главное окно приложения
 """
 
+import html
 import os
 import json
+import sys
+import tempfile
 from pathlib import Path
 from typing import Dict, Optional, List, Tuple
+from urllib.parse import urlparse
 
 from ..core import (
-    APP_NAME, APP_VERSION, APP_AUTHOR, NUM_POINTS,
+    APP_NAME, APP_VERSION, APP_AUTHOR, APP_MAX_URL, APP_TELEGRAM_LABEL, APP_TELEGRAM_URL, APP_UPDATE_FEED_URL,
+    NUM_POINTS,
     COLOR_NORMAL, COLOR_YOLO, COLOR_STAGE1, COLOR_STAGE2, COLOR_GT,
     DEFAULT_POINT_RADIUS, YOLO_TO_WINGSDIG,
     WingPoint, BBox, Wing, ImageData, EditMode,
     get_device, load_stage2_model, load_stage2_portable_model, load_subpixel_model, TORCH_AVAILABLE
+)
+from ..core.update_manager import (
+    create_windows_update_script,
+    is_direct_download_url,
+    launch_windows_update_script,
 )
 from ..core.tps_io import load_tps_into_image, save_tps_from_image
 
@@ -25,10 +35,10 @@ from PyQt5.QtWidgets import (
     QSplitter, QToolBar, QFileDialog, QMessageBox, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QShortcut, QRadioButton, QButtonGroup, QAction, QTabWidget, QGridLayout,
-    QApplication, QMenu, QSizePolicy
+    QApplication, QMenu, QSizePolicy, QDialog, QDialogButtonBox, QProgressDialog
 )
-from PyQt5.QtCore import Qt, pyqtSignal
-from PyQt5.QtGui import QPixmap, QColor, QKeySequence, QPen
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QUrl
+from PyQt5.QtGui import QPixmap, QColor, QKeySequence, QPen, QDesktopServices
 
 from .graphics_items import PointItem, WingLabelItem, BBoxItem, MeasurementLineItem
 from .graphics_view import ZoomableGraphicsView
@@ -38,7 +48,7 @@ from .interpretation_widget import InterpretationWidget, GlobalInterpretationWid
 from .batch_widget import BatchResultsWidget
 from .dialogs import PointSettingsDialog
 
-from ..workers import ProcessingWorker
+from ..workers import ProcessingWorker, UpdateCheckWorker, UpdateDownloadWorker
 
 
 class MainWindow(QMainWindow):
@@ -93,6 +103,11 @@ class MainWindow(QMainWindow):
         self.show_stage2 = False
         self.show_bboxes = False
         self.show_measurement_lines = False
+        self._update_info = None
+        self._update_check_worker = None
+        self._update_download_worker = None
+        self._update_progress_dialog = None
+        self._skip_unsaved_prompt = False
         
         self._setup_ui()
         self._setup_menu()
@@ -100,17 +115,41 @@ class MainWindow(QMainWindow):
         self._setup_shortcuts()
         self._apply_light_theme()
         self._load_models()
+        QTimer.singleShot(1500, self._auto_check_for_updates)
     
     def _setup_ui(self):
         """Настройка пользовательского интерфейса"""
         central = QWidget()
         self.setCentralWidget(central)
         
-        main_layout = QHBoxLayout(central)
-        main_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout = QVBoxLayout(central)
+        root_layout.setContentsMargins(0, 0, 0, 0)
+        root_layout.setSpacing(0)
+
+        self.update_banner = QWidget()
+        self.update_banner.setVisible(False)
+        self.update_banner.setStyleSheet(
+            "background-color: #fff3cd; border-bottom: 1px solid #e0c36c;"
+        )
+        banner_layout = QHBoxLayout(self.update_banner)
+        banner_layout.setContentsMargins(12, 6, 12, 6)
+
+        self.lbl_update_banner = QLabel("")
+        self.lbl_update_banner.setWordWrap(True)
+        banner_layout.addWidget(self.lbl_update_banner, 1)
+
+        self.btn_update_banner = QPushButton("Обновить")
+        self.btn_update_banner.clicked.connect(self._start_pending_update)
+        banner_layout.addWidget(self.btn_update_banner)
+
+        self.btn_hide_update_banner = QPushButton("Позже")
+        self.btn_hide_update_banner.clicked.connect(self._hide_update_banner)
+        banner_layout.addWidget(self.btn_hide_update_banner)
+
+        root_layout.addWidget(self.update_banner)
         
         self.main_splitter = QSplitter(Qt.Horizontal)
-        main_layout.addWidget(self.main_splitter)
+        root_layout.addWidget(self.main_splitter, 1)
         
         # ЛЕВАЯ ПАНЕЛЬ - список файлов
         self.left_panel = QWidget()
@@ -408,6 +447,8 @@ class MainWindow(QMainWindow):
         view_menu.addAction("Настройки точек...", self._show_point_settings)
         
         help_menu = menubar.addMenu("Справка")
+        help_menu.addAction("Проверить обновление", lambda: self._check_for_updates(manual=True))
+        help_menu.addSeparator()
         help_menu.addAction("О программе", self._show_about)
 
         gpt_menu = menubar.addMenu("GPT")
@@ -1779,29 +1820,292 @@ class MainWindow(QMainWindow):
         """Масштаб 1:1"""
         self.view.resetTransform()
         self.view._zoom = 1.0
+
+    def _auto_check_for_updates(self):
+        """Автоматическая проверка обновлений после запуска EXE."""
+        if getattr(sys, "frozen", False):
+            self._check_for_updates(manual=False)
+
+    def _check_for_updates(self, manual: bool = False):
+        """Проверить наличие новой версии."""
+        if self._update_check_worker and self._update_check_worker.isRunning():
+            if manual:
+                self.statusBar().showMessage("Проверка обновлений уже выполняется.", 3000)
+            return
+
+        self._update_check_worker = UpdateCheckWorker(APP_UPDATE_FEED_URL, APP_VERSION)
+        self._update_check_worker.finished.connect(
+            lambda info: self._on_update_check_finished(info, manual)
+        )
+        self._update_check_worker.error.connect(
+            lambda message: self._on_update_check_error(message, manual)
+        )
+        self._update_check_worker.start()
+
+        if manual:
+            self.statusBar().showMessage("Проверяю обновления...", 3000)
+
+    def _on_update_check_finished(self, info: dict, manual: bool):
+        """Обработка результата проверки обновлений."""
+        self._update_info = info if info.get("update_available") else None
+        if info.get("update_available"):
+            self._show_update_banner(info)
+            self.statusBar().showMessage(
+                f"Доступно обновление {info['version']} (у вас {APP_VERSION}).",
+                5000,
+            )
+            if manual:
+                self._prompt_update(info)
+        else:
+            self._hide_update_banner()
+            if manual:
+                QMessageBox.information(
+                    self,
+                    "Обновление",
+                    f"У вас уже актуальная версия {APP_VERSION}.",
+                )
+            else:
+                self.statusBar().showMessage("Обновлений не найдено.", 3000)
+
+        self._update_check_worker = None
+
+    def _on_update_check_error(self, message: str, manual: bool):
+        """Ошибка проверки обновлений."""
+        self._update_check_worker = None
+        if manual:
+            QMessageBox.warning(
+                self,
+                "Обновление",
+                f"Не удалось проверить обновления.\n\n{message}",
+            )
+        else:
+            self.statusBar().showMessage("Не удалось проверить обновления.", 3000)
+
+    def _show_update_banner(self, info: dict):
+        """Показать верхнюю плашку о доступном обновлении."""
+        published_at = f", опубликовано {info['published_at']}" if info.get("published_at") else ""
+        self.lbl_update_banner.setText(
+            f"Доступна новая версия {info['version']} (у вас {APP_VERSION}{published_at})."
+        )
+        self.update_banner.setVisible(True)
+
+    def _hide_update_banner(self):
+        """Скрыть верхнюю плашку обновления."""
+        self.update_banner.setVisible(False)
+
+    def _start_pending_update(self):
+        """Запустить скачивание найденного обновления."""
+        if self._update_info:
+            self._begin_update_download(self._update_info)
+
+    def _prompt_update(self, info: dict):
+        """Показать пользователю найденное обновление."""
+        parts = [f"Доступна версия {info['version']} (у вас {APP_VERSION})."]
+        if info.get("headline"):
+            parts.append("")
+            parts.append(info["headline"])
+        if info.get("notes"):
+            parts.append("")
+            parts.append("Что изменилось:")
+            parts.extend(f"- {note}" for note in info["notes"])
+
+        reply = QMessageBox.question(
+            self,
+            "Доступно обновление",
+            "\n".join(parts),
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            self._begin_update_download(info)
+
+    def _begin_update_download(self, info: dict):
+        """Скачать обновление или открыть страницу загрузки."""
+        download_url = info.get("download_url", "").strip()
+        if not download_url:
+            QMessageBox.warning(
+                self,
+                "Обновление",
+                "Для этой версии не указана ссылка на скачивание.",
+            )
+            return
+
+        if not getattr(sys, "frozen", False) or os.name != "nt":
+            QDesktopServices.openUrl(QUrl(download_url))
+            QMessageBox.information(
+                self,
+                "Обновление",
+                "Автообновление работает в установленной Windows-версии. "
+                "Ссылка на загрузку открыта в браузере.",
+            )
+            return
+
+        if not is_direct_download_url(download_url):
+            QDesktopServices.openUrl(QUrl(download_url))
+            QMessageBox.information(
+                self,
+                "Обновление",
+                "Для этой версии доступна страница загрузки. Я открыл ее в браузере.",
+            )
+            return
+
+        if self._update_download_worker and self._update_download_worker.isRunning():
+            QMessageBox.information(
+                self,
+                "Обновление",
+                "Скачивание обновления уже выполняется.",
+            )
+            return
+
+        file_name = Path(urlparse(download_url).path).name or Path(sys.executable).name
+        download_dir = Path(tempfile.gettempdir()) / "neurowings-updates"
+        destination = download_dir / file_name
+
+        self._update_progress_dialog = QProgressDialog("Скачивание обновления...", None, 0, 0, self)
+        self._update_progress_dialog.setWindowTitle("Обновление")
+        self._update_progress_dialog.setCancelButton(None)
+        self._update_progress_dialog.setWindowModality(Qt.WindowModal)
+        self._update_progress_dialog.show()
+
+        self._update_download_worker = UpdateDownloadWorker(info, destination)
+        self._update_download_worker.progress.connect(self._on_update_download_progress)
+        self._update_download_worker.finished.connect(
+            lambda path_str: self._on_update_download_finished(path_str, info)
+        )
+        self._update_download_worker.error.connect(self._on_update_download_error)
+        self._update_download_worker.start()
+
+    def _on_update_download_progress(self, current: int, total: int):
+        """Обновить прогресс скачивания."""
+        if not self._update_progress_dialog:
+            return
+
+        if total > 0:
+            self._update_progress_dialog.setRange(0, total)
+            self._update_progress_dialog.setValue(current)
+            self._update_progress_dialog.setLabelText(
+                f"Скачивание обновления... {current / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} МБ"
+            )
+        else:
+            self._update_progress_dialog.setRange(0, 0)
+
+    def _on_update_download_finished(self, path_str: str, info: dict):
+        """После скачивания предложить применить EXE."""
+        if self._update_progress_dialog:
+            self._update_progress_dialog.close()
+            self._update_progress_dialog = None
+
+        self._update_download_worker = None
+        downloaded_path = Path(path_str)
+
+        reply = QMessageBox.question(
+            self,
+            "Обновление скачано",
+            f"Версия {info['version']} скачана.\n\n"
+            "Сейчас программа закроется, заменит текущий EXE и запустится заново.\n\n"
+            "Применить обновление сейчас?",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.Yes,
+        )
+        if reply == QMessageBox.Yes:
+            self._install_download(downloaded_path)
+
+    def _on_update_download_error(self, message: str):
+        """Ошибка скачивания обновления."""
+        if self._update_progress_dialog:
+            self._update_progress_dialog.close()
+            self._update_progress_dialog = None
+
+        self._update_download_worker = None
+        QMessageBox.warning(
+            self,
+            "Обновление",
+            f"Не удалось скачать обновление.\n\n{message}",
+        )
+
+    def _install_download(self, downloaded_path: Path):
+        """Подготовить замену текущего EXE после выхода из приложения."""
+        if not self._confirm_close():
+            return
+
+        try:
+            script_path = create_windows_update_script(
+                downloaded_path,
+                Path(sys.executable),
+                os.getpid(),
+            )
+            launch_windows_update_script(script_path)
+        except Exception as exc:
+            QMessageBox.critical(
+                self,
+                "Обновление",
+                f"Не удалось запустить установку обновления.\n\n{exc}",
+            )
+            return
+
+        self._skip_unsaved_prompt = True
+        QApplication.instance().quit()
+
+    def _confirm_close(self) -> bool:
+        """Подтвердить выход, если есть несохраненные данные."""
+        modified = [d for d in self.images.values() if d.is_modified]
+        if not modified:
+            return True
+
+        reply = QMessageBox.question(
+            self,
+            "Сохранить?",
+            f"Есть {len(modified)} несохранённых файлов. Сохранить?",
+            QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
+        )
+
+        if reply == QMessageBox.Save:
+            self._save_all()
+            return True
+        if reply == QMessageBox.Cancel:
+            return False
+        return True
     
     def _show_about(self):
         """О программе"""
-        QMessageBox.about(
-            self, "О программе",
-            f"<h2>{APP_NAME} v{APP_VERSION}</h2>"
+        dialog = QDialog(self)
+        dialog.setWindowTitle("О программе")
+        dialog.resize(560, 280)
+
+        layout = QVBoxLayout(dialog)
+
+        current_update = "обновления будут проверяться с сервера"
+        if self._update_info:
+            current_update = f"доступна версия {html.escape(self._update_info['version'])}"
+
+        label = QLabel(
+            f"<h2>{html.escape(APP_NAME)} v{html.escape(APP_VERSION)}</h2>"
             f"<p>Автоматическая морфометрия крыльев пчёл</p>"
-            f"<p>Автор: {APP_AUTHOR}</p>"
+            f"<p><b>Автор:</b> {html.escape(APP_AUTHOR)}</p>"
+            f"<p><b>MAX:</b> <a href='{html.escape(APP_MAX_URL)}'>{html.escape(APP_MAX_URL)}</a></p>"
+            f"<p><b>Telegram:</b> <a href='{html.escape(APP_TELEGRAM_URL)}'>"
+            f"{html.escape(APP_TELEGRAM_LABEL)}</a></p>"
+            f"<p><b>Статус обновлений:</b> {current_update}</p>"
         )
+        label.setWordWrap(True)
+        label.setTextFormat(Qt.RichText)
+        label.setTextInteractionFlags(Qt.TextBrowserInteraction)
+        label.setOpenExternalLinks(True)
+        layout.addWidget(label)
+
+        buttons = QDialogButtonBox(QDialogButtonBox.Close)
+        btn_check_update = QPushButton("Проверить обновление")
+        btn_check_update.clicked.connect(dialog.accept)
+        btn_check_update.clicked.connect(lambda: self._check_for_updates(manual=True))
+        buttons.addButton(btn_check_update, QDialogButtonBox.ActionRole)
+        buttons.rejected.connect(dialog.reject)
+        layout.addWidget(buttons)
+
+        dialog.exec_()
     
     def closeEvent(self, event):
         """Закрытие окна"""
-        modified = [d for d in self.images.values() if d.is_modified]
-        if modified:
-            reply = QMessageBox.question(
-                self, "Сохранить?",
-                f"Есть {len(modified)} несохранённых файлов. Сохранить?",
-                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel
-            )
-            
-            if reply == QMessageBox.Save:
-                self._save_all()
-            elif reply == QMessageBox.Cancel:
-                event.ignore()
-                return
-        event.accept()
+        if self._skip_unsaved_prompt or self._confirm_close():
+            event.accept()
+            return
+        event.ignore()
