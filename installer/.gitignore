@@ -1,0 +1,15 @@
+# Игнорировать загруженные redistributables (большие файлы)
+redistributables/
+
+# Временные файлы сборки
+build/
+dist/
+*.spec.bak
+
+# Логи
+*.log
+
+# Кеш Python
+__pycache__/
+*.pyc
+*.pyo
