@@ -255,10 +255,28 @@ function Run-Agent {
     }
 
     Write-Log "Запускаю сборку и публикацию версии $appVersion"
-    & powershell.exe @buildArgs 2>&1 | ForEach-Object {
-        Write-Log $_
+    $buildStdoutPath = Join-Path (Split-Path $ConfigPath -Parent) "build-stdout.log"
+    $buildStderrPath = Join-Path (Split-Path $ConfigPath -Parent) "build-stderr.log"
+    Remove-Item $buildStdoutPath, $buildStderrPath -Force -ErrorAction SilentlyContinue
+
+    $buildProcess = Start-Process -FilePath "powershell.exe" `
+        -ArgumentList $buildArgs `
+        -RedirectStandardOutput $buildStdoutPath `
+        -RedirectStandardError $buildStderrPath `
+        -Wait `
+        -PassThru `
+        -NoNewWindow
+
+    foreach ($streamPath in @($buildStdoutPath, $buildStderrPath)) {
+        if (-not (Test-Path $streamPath)) {
+            continue
+        }
+        Get-Content $streamPath | ForEach-Object {
+            Write-Log $_
+        }
     }
-    $buildExitCode = $LASTEXITCODE
+
+    $buildExitCode = $buildProcess.ExitCode
     if ($buildExitCode -ne 0) {
         throw "Сборка или публикация завершились с ошибкой ($buildExitCode)."
     }
