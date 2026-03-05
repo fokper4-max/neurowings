@@ -308,7 +308,13 @@ else {
 $agentPath = Join-Path $RepositoryPath "installer\run_release_agent.ps1"
 $taskCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$agentPath`""
 
-& schtasks.exe /Delete /TN $TaskName /F 2>$null | Out-Null
+& cmd.exe /c "schtasks /Query /TN `"$TaskName`" >nul 2>&1"
+if ($LASTEXITCODE -eq 0) {
+    & schtasks.exe /Delete /TN $TaskName /F | Out-Null
+    if ($LASTEXITCODE -ne 0) {
+        throw "Не удалось удалить старую Scheduled Task."
+    }
+}
 & schtasks.exe /Create /F /TN $TaskName /TR $taskCommand /SC MINUTE /MO $PollMinutes /RU $TaskUser /RP $taskPasswordPlain /RL HIGHEST
 if ($LASTEXITCODE -ne 0) {
     throw "Не удалось зарегистрировать Scheduled Task."
