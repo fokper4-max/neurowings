@@ -48,6 +48,17 @@ except (PermissionError, OSError) as e:
 logger = logging.getLogger("NeuroWings")
 
 
+def _resolve_app_icon() -> Path | None:
+    candidates = [
+        BASE_DIR / "neurowings" / "assets" / "app_icon.png",
+        BASE_DIR / "neurowings" / "assets" / "app_icon.ico",
+    ]
+    for path in candidates:
+        if path.exists():
+            return path
+    return None
+
+
 def _log_startup():
     logger.info("=" * 100)
     logger.info("НейроКрылья START")
@@ -194,7 +205,7 @@ def main():
 
     try:
         from PyQt5.QtWidgets import QApplication
-        from PyQt5.QtGui import QColor, QPalette
+        from PyQt5.QtGui import QColor, QPalette, QIcon
         from PyQt5.QtCore import Qt
     except ImportError as e:
         logger.error(f"PyQt5 не установлен: {e}")
@@ -237,6 +248,9 @@ def main():
     # Приложение
     app = SafeApplication(sys.argv)
     app.setApplicationName("НейроКрылья")
+    icon_path = _resolve_app_icon()
+    if icon_path is not None:
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     try:
         palette = QPalette()

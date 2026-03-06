@@ -101,7 +101,7 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=None,  # Можно добавить путь к .ico файлу
+    icon=str(neurowings_dir / 'assets' / 'app_icon.ico'),
 )
 
 # Для отладочной версии с консолью раскомментируйте:

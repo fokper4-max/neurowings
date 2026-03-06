@@ -16,8 +16,8 @@ InstallDir "$PROGRAMFILES64\${PRODUCT_NAME}"
 RequestExecutionLevel admin
 
 !define MUI_ABORTWARNING
-!define MUI_ICON "${NSISDIR}\Contrib\Graphics\Icons\modern-install.ico"
-!define MUI_UNICON "${NSISDIR}\Contrib\Graphics\Icons\modern-uninstall.ico"
+!define MUI_ICON "..\neurowings\assets\app_icon.ico"
+!define MUI_UNICON "..\neurowings\assets\app_icon.ico"
 
 !insertmacro MUI_PAGE_WELCOME
 !insertmacro MUI_PAGE_DIRECTORY
