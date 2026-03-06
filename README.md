@@ -94,3 +94,7 @@ Keep these version markers synchronized when publishing a new release:
 Without the model files, the application can still start, and non-neural parts
 of the workflow remain available. Full neural processing requires the local
 model files on the machine where you run or build the app.
+# Документация по схеме релизов и автообновлений
+
+- Основная схема: [docs/RELEASE_SYSTEM.md](docs/RELEASE_SYSTEM.md)
+- Инструкция по обновлениям: [installer/UPDATE_GUIDE.md](installer/UPDATE_GUIDE.md)

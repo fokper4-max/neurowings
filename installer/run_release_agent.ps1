@@ -181,6 +181,7 @@ function Run-Agent {
         last_seen_commit = ""
         last_built_commit = ""
         last_built_version = ""
+        last_docs_sync_commit = ""
     })
 
     $gitExe = Resolve-Executable -ConfiguredPath $config.GitExe -FallbackName "git" -ErrorMessage "Git не найден."
@@ -220,6 +221,56 @@ function Run-Agent {
     }
     Normalize-InstallerScriptEncoding -RepositoryRoot $config.RepositoryPath
 
+    $appVersion = Get-AppVersion -RepositoryPath $config.RepositoryPath
+    $serverPassword = Get-PlainTextFromEncryptedFile -Path $config.PublishPasswordFile
+    if ($state.last_built_version -eq $appVersion) {
+        $docsScript = Join-Path $config.RepositoryPath "installer\sync_docs.ps1"
+        $docsArgs = @(
+            "-NoProfile",
+            "-ExecutionPolicy", "Bypass",
+            "-File", $docsScript,
+            "-PythonExe", $pythonExe,
+            "-ServerHost", $config.PublishServerHost,
+            "-ServerPort", "$($config.PublishServerPort)",
+            "-ServerUser", $config.PublishServerUser,
+            "-ServerPassword", $serverPassword,
+            "-RemoteDir", $config.PublishRemoteDir,
+            "-PublicBaseUrl", $config.PublishBaseUrl
+        )
+
+        Write-Log "APP_VERSION не изменилась ($appVersion). Синхронизирую документацию."
+        $docsStdoutPath = Join-Path (Split-Path $ConfigPath -Parent) "docs-stdout.log"
+        $docsStderrPath = Join-Path (Split-Path $ConfigPath -Parent) "docs-stderr.log"
+        Remove-Item $docsStdoutPath, $docsStderrPath -Force -ErrorAction SilentlyContinue
+
+        $docsProcess = Start-Process -FilePath "powershell.exe" `
+            -ArgumentList $docsArgs `
+            -RedirectStandardOutput $docsStdoutPath `
+            -RedirectStandardError $docsStderrPath `
+            -Wait `
+            -PassThru `
+            -NoNewWindow
+
+        foreach ($streamPath in @($docsStdoutPath, $docsStderrPath)) {
+            if (-not (Test-Path $streamPath)) {
+                continue
+            }
+            Get-Content $streamPath | ForEach-Object {
+                Write-Log $_
+            }
+        }
+
+        if ($docsProcess.ExitCode -ne 0) {
+            throw "Синхронизация документации завершилась с ошибкой ($($docsProcess.ExitCode))."
+        }
+
+        $state.last_seen_commit = $remoteHead
+        $state.last_docs_sync_commit = $remoteHead
+        Save-Json -Path $statePath -Value $state
+        Write-Log "Документация успешно синхронизирована для коммита $remoteHead."
+        return
+    }
+
     $modelsDir = Resolve-ModelsSourceDir -SourceDir $config.ModelsSourceDir -RepositoryPath $config.RepositoryPath
     if (-not [string]::IsNullOrWhiteSpace($config.ModelsSourceDir)) {
         Write-Log "Использую внешнюю папку моделей: $modelsDir"
@@ -231,15 +282,6 @@ function Run-Agent {
         Write-Log "Папка моделей не найдена. Сборка завершится ошибкой, если потребуются обязательные модели." "WARN"
     }
 
-    $appVersion = Get-AppVersion -RepositoryPath $config.RepositoryPath
-    if ($state.last_built_version -eq $appVersion) {
-        Write-Log "APP_VERSION не изменилась ($appVersion). Публикацию пропускаю."
-        $state.last_seen_commit = $remoteHead
-        Save-Json -Path $statePath -Value $state
-        return
-    }
-
-    $serverPassword = Get-PlainTextFromEncryptedFile -Path $config.PublishPasswordFile
     $buildScript = Join-Path $config.RepositoryPath "installer\build_and_publish.ps1"
     $buildArgs = @(
         "-NoProfile",
@@ -292,6 +334,7 @@ function Run-Agent {
     $state.last_seen_commit = $remoteHead
     $state.last_built_commit = $remoteHead
     $state.last_built_version = $appVersion
+    $state.last_docs_sync_commit = $remoteHead
     Save-Json -Path $statePath -Value $state
 
     Write-Log "Версия $appVersion успешно собрана и опубликована."

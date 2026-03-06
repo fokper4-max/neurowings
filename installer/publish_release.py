@@ -9,6 +9,7 @@ import getpass
 import hashlib
 import json
 import os
+import posixpath
 import re
 import sys
 from datetime import date
@@ -23,6 +24,15 @@ DEFAULT_SERVER_USER = "root"
 DEFAULT_REMOTE_DIR = "/opt/max-control/public/downloads/neurowings"
 DEFAULT_PUBLIC_BASE_URL = "https://193-124-117-175.nip.io/downloads/neurowings"
 DEFAULT_APP_NAME = "НейроКрылья"
+DOCUMENTATION_FILES = [
+    "README.md",
+    "CHANGELOG.md",
+    "installer/README.md",
+    "installer/UPDATE_GUIDE.md",
+    "installer/CHANGELOG.md",
+    "models/README.txt",
+    "docs/RELEASE_SYSTEM.md",
+]
 
 
 class PublishError(RuntimeError):
@@ -142,6 +152,48 @@ def build_feed(version: str, download_name: str, setup_name: str | None, headlin
     return feed
 
 
+def collect_documentation_files() -> list[tuple[Path, str]]:
+    docs: list[tuple[Path, str]] = []
+    missing: list[str] = []
+    for relative in DOCUMENTATION_FILES:
+        path = (PROJECT_ROOT / relative).resolve()
+        if not path.exists():
+            missing.append(relative)
+            continue
+        docs.append((path, relative.replace("\\", "/")))
+    if missing:
+        raise PublishError(
+            "Не найдены обязательные файлы документации: " + ", ".join(missing)
+        )
+    return docs
+
+
+def build_docs_manifest(
+    version: str,
+    docs_base_url: str,
+    public_base_url: str,
+    docs: list[tuple[Path, str]],
+) -> dict:
+    files = []
+    for local_path, relative_path in docs:
+        files.append(
+            {
+                "path": relative_path,
+                "url": f"{docs_base_url.rstrip('/')}/{relative_path}",
+                "sha256": sha256sum(local_path),
+                "size": local_path.stat().st_size,
+            }
+        )
+    return {
+        "generated_at": str(date.today()),
+        "version": version,
+        "docs_base_url": docs_base_url.rstrip("/"),
+        "update_feed_url": f"{public_base_url.rstrip('/')}/update-feed.json",
+        "latest_exe_url": f"{public_base_url.rstrip('/')}/NeuroWings-latest.exe",
+        "files": files,
+    }
+
+
 def ensure_paramiko():
     try:
         import paramiko  # type: ignore
@@ -194,6 +246,31 @@ def sftp_upload_file(sftp, local_path: Path, remote_path: str) -> None:
     sftp.rename(temp_path, remote_path)
 
 
+def upload_documentation(sftp, remote_dir: str, public_base_url: str, version: str) -> dict:
+    docs = collect_documentation_files()
+    docs_remote_dir = f"{remote_dir.rstrip('/')}/docs"
+    docs_base_url = f"{public_base_url.rstrip('/')}/docs"
+    sftp_mkdir_p(sftp, docs_remote_dir)
+
+    for local_path, relative_path in docs:
+        remote_path = posixpath.join(docs_remote_dir, relative_path)
+        sftp_mkdir_p(sftp, posixpath.dirname(remote_path))
+        sftp_upload_file(sftp, local_path, remote_path)
+
+    manifest = build_docs_manifest(
+        version=version,
+        docs_base_url=docs_base_url,
+        public_base_url=public_base_url,
+        docs=docs,
+    )
+    sftp_upload_bytes(
+        sftp,
+        f"{docs_remote_dir}/index.json",
+        json.dumps(manifest, ensure_ascii=False, indent=2).encode("utf-8"),
+    )
+    return manifest
+
+
 def publish(args) -> None:
     version = args.version or current_app_version()
     nsi_version = installer_version()
@@ -202,55 +279,73 @@ def publish(args) -> None:
             f"Версия приложения ({version}) не совпадает с installer.nsi ({nsi_version})."
         )
 
-    exe_path = Path(args.exe).resolve()
-    if not exe_path.exists():
-        raise PublishError(f"EXE не найден: {exe_path}")
-
-    setup_path = Path(args.setup).resolve() if args.setup else None
-    if setup_path and not setup_path.exists():
-        raise PublishError(f"Setup не найден: {setup_path}")
-
-    changelog_notes = extract_release_notes(PROJECT_ROOT / "CHANGELOG.md", version)
-    notes = [note.strip() for note in (args.note or []) if note.strip()]
-    if not notes:
-        notes = changelog_notes
-    if not notes:
-        notes = [f"Обновление версии {version}."]
-
-    headline = args.headline.strip() if args.headline else notes[0]
-    upload_exe_name = f"NeuroWings-{version}.exe"
-    upload_setup_name = f"NeuroWings-{version}-Setup.exe" if setup_path else None
-    latest_exe_name = "NeuroWings-latest.exe"
-    latest_setup_name = "NeuroWings-latest-Setup.exe" if setup_path else None
-    feed = build_feed(
-        version=version,
-        download_name=upload_exe_name,
-        setup_name=upload_setup_name,
-        headline=headline,
-        notes=notes,
-        base_url=args.public_base_url,
-    )
-    feed["sha256"] = sha256sum(exe_path)
-    feed["latest_url"] = f"{args.public_base_url.rstrip('/')}/{latest_exe_name}"
-
-    remote_exe_path = f"{args.remote_dir.rstrip('/')}/{upload_exe_name}"
-    remote_latest_exe_path = f"{args.remote_dir.rstrip('/')}/{latest_exe_name}"
-    remote_feed_path = f"{args.remote_dir.rstrip('/')}/update-feed.json"
-    remote_setup_path = (
-        f"{args.remote_dir.rstrip('/')}/{upload_setup_name}" if upload_setup_name else None
-    )
-    remote_latest_setup_path = (
-        f"{args.remote_dir.rstrip('/')}/{latest_setup_name}" if latest_setup_name else None
-    )
-
     summary = {
+        "mode": "docs-only" if args.docs_only else "release",
         "version": version,
-        "exe": str(exe_path),
-        "setup": str(setup_path) if setup_path else None,
         "remote_dir": args.remote_dir,
-        "download_url": feed["download_url"],
-        "feed": feed,
+        "docs_url": f"{args.public_base_url.rstrip('/')}/docs/index.json",
     }
+
+    exe_path: Path | None = None
+    setup_path: Path | None = None
+    feed: dict | None = None
+    remote_exe_path = ""
+    remote_latest_exe_path = ""
+    remote_feed_path = f"{args.remote_dir.rstrip('/')}/update-feed.json"
+    remote_setup_path: str | None = None
+    remote_latest_setup_path: str | None = None
+
+    if not args.docs_only:
+        if not args.exe:
+            raise PublishError("Для публикации релиза нужен --exe.")
+        exe_path = Path(args.exe).resolve()
+        if not exe_path.exists():
+            raise PublishError(f"EXE не найден: {exe_path}")
+
+        setup_path = Path(args.setup).resolve() if args.setup else None
+        if setup_path and not setup_path.exists():
+            raise PublishError(f"Setup не найден: {setup_path}")
+
+        changelog_notes = extract_release_notes(PROJECT_ROOT / "CHANGELOG.md", version)
+        notes = [note.strip() for note in (args.note or []) if note.strip()]
+        if not notes:
+            notes = changelog_notes
+        if not notes:
+            notes = [f"Обновление версии {version}."]
+
+        headline = args.headline.strip() if args.headline else notes[0]
+        upload_exe_name = f"NeuroWings-{version}.exe"
+        upload_setup_name = f"NeuroWings-{version}-Setup.exe" if setup_path else None
+        latest_exe_name = "NeuroWings-latest.exe"
+        latest_setup_name = "NeuroWings-latest-Setup.exe" if setup_path else None
+        feed = build_feed(
+            version=version,
+            download_name=upload_exe_name,
+            setup_name=upload_setup_name,
+            headline=headline,
+            notes=notes,
+            base_url=args.public_base_url,
+        )
+        feed["sha256"] = sha256sum(exe_path)
+        feed["latest_url"] = f"{args.public_base_url.rstrip('/')}/{latest_exe_name}"
+
+        remote_exe_path = f"{args.remote_dir.rstrip('/')}/{upload_exe_name}"
+        remote_latest_exe_path = f"{args.remote_dir.rstrip('/')}/{latest_exe_name}"
+        remote_setup_path = (
+            f"{args.remote_dir.rstrip('/')}/{upload_setup_name}" if upload_setup_name else None
+        )
+        remote_latest_setup_path = (
+            f"{args.remote_dir.rstrip('/')}/{latest_setup_name}" if latest_setup_name else None
+        )
+
+        summary.update(
+            {
+                "exe": str(exe_path),
+                "setup": str(setup_path) if setup_path else None,
+                "download_url": feed["download_url"],
+                "feed": feed,
+            }
+        )
 
     if args.dry_run:
         print(json.dumps(summary, ensure_ascii=False, indent=2))
@@ -277,17 +372,25 @@ def publish(args) -> None:
         sftp = client.open_sftp()
         try:
             sftp_mkdir_p(sftp, args.remote_dir)
-            sftp_upload_file(sftp, exe_path, remote_exe_path)
-            sftp_upload_file(sftp, exe_path, remote_latest_exe_path)
-            if setup_path and remote_setup_path:
-                sftp_upload_file(sftp, setup_path, remote_setup_path)
-            if setup_path and remote_latest_setup_path:
-                sftp_upload_file(sftp, setup_path, remote_latest_setup_path)
-            sftp_upload_bytes(
-                sftp,
-                remote_feed_path,
-                json.dumps(feed, ensure_ascii=False, indent=2).encode("utf-8"),
+            if exe_path and feed:
+                sftp_upload_file(sftp, exe_path, remote_exe_path)
+                sftp_upload_file(sftp, exe_path, remote_latest_exe_path)
+                if setup_path and remote_setup_path:
+                    sftp_upload_file(sftp, setup_path, remote_setup_path)
+                if setup_path and remote_latest_setup_path:
+                    sftp_upload_file(sftp, setup_path, remote_latest_setup_path)
+                sftp_upload_bytes(
+                    sftp,
+                    remote_feed_path,
+                    json.dumps(feed, ensure_ascii=False, indent=2).encode("utf-8"),
+                )
+            docs_manifest = upload_documentation(
+                sftp=sftp,
+                remote_dir=args.remote_dir,
+                public_base_url=args.public_base_url,
+                version=version,
             )
+            summary["docs_manifest"] = docs_manifest
         finally:
             sftp.close()
     finally:
@@ -299,11 +402,12 @@ def publish(args) -> None:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--exe", required=True, help="Path to the built EXE")
+    parser.add_argument("--exe", help="Path to the built EXE")
     parser.add_argument("--setup", help="Path to the setup EXE")
     parser.add_argument("--version", help="Release version; defaults to APP_VERSION")
     parser.add_argument("--headline", help="Short release headline")
     parser.add_argument("--note", action="append", default=[], help="Release note line")
+    parser.add_argument("--docs-only", action="store_true", help="Upload only documentation")
     parser.add_argument("--server-host", default=DEFAULT_SERVER_HOST)
     parser.add_argument("--server-port", type=int, default=DEFAULT_SERVER_PORT)
     parser.add_argument("--server-user", default=DEFAULT_SERVER_USER)
