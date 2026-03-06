@@ -12,8 +12,44 @@ from pathlib import Path
 # Базовая директория проекта
 base_dir = Path(os.path.abspath(SPECPATH)).parent
 
+REQUIRED_MODEL_FILES = [
+    'yolo_detect_best.pt',
+    'yolo_pose_best.pt',
+    'stage2_best.pth',
+    'stage2_portable.pth',
+    'subpixel_best.pth',
+]
+
+
+def resolve_models_dir():
+    override = os.environ.get('NEUROWINGS_MODELS_DIR', '').strip()
+    if override:
+        candidate = Path(override).expanduser()
+        if not candidate.is_absolute():
+            candidate = (base_dir / candidate).resolve()
+        if not candidate.exists():
+            raise FileNotFoundError(f"Папка моделей не найдена: {candidate}")
+        print(f"Using external models directory: {candidate}")
+        return candidate
+    return base_dir / 'models'
+
+
+def validate_models_dir(models_path):
+    allow_missing = os.environ.get('NEUROWINGS_ALLOW_MISSING_MODELS', '').strip().lower() in {'1', 'true', 'yes'}
+    if allow_missing:
+        return
+    missing = [name for name in REQUIRED_MODEL_FILES if not (models_path / name).exists()]
+    if missing:
+        raise FileNotFoundError(
+            "В папке моделей отсутствуют обязательные файлы: "
+            + ", ".join(missing)
+            + f". Проверенный путь: {models_path}"
+        )
+
+
 # Пути к важным папкам
-models_dir = base_dir / 'models'
+models_dir = resolve_models_dir()
+validate_models_dir(models_dir)
 neurowings_dir = base_dir / 'neurowings'
 
 # Определение скрытых импортов для PyTorch и других зависимостей

@@ -150,23 +150,22 @@ function Add-ToolDirectoriesToPath {
     }
 }
 
-function Sync-Models {
+function Resolve-ModelsSourceDir {
     param(
         [string]$SourceDir,
-        [string]$TargetDir
+        [string]$RepositoryPath
     )
-    if ([string]::IsNullOrWhiteSpace($SourceDir)) {
-        return
+    if (-not [string]::IsNullOrWhiteSpace($SourceDir)) {
+        if (-not (Test-Path $SourceDir)) {
+            throw "Папка моделей не найдена: $SourceDir"
+        }
+        return (Resolve-Path $SourceDir).Path
     }
-    if (-not (Test-Path $SourceDir)) {
-        throw "Папка моделей не найдена: $SourceDir"
+    $repoModelsDir = Join-Path $RepositoryPath "models"
+    if (Test-Path $repoModelsDir) {
+        return (Resolve-Path $repoModelsDir).Path
     }
-
-    New-Item -ItemType Directory -Path $TargetDir -Force | Out-Null
-    & robocopy $SourceDir $TargetDir /MIR /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
-    if ($LASTEXITCODE -gt 7) {
-        throw "robocopy завершился с ошибкой ($LASTEXITCODE)"
-    }
+    return $null
 }
 
 function Run-Agent {
@@ -221,9 +220,15 @@ function Run-Agent {
     }
     Normalize-InstallerScriptEncoding -RepositoryRoot $config.RepositoryPath
 
+    $modelsDir = Resolve-ModelsSourceDir -SourceDir $config.ModelsSourceDir -RepositoryPath $config.RepositoryPath
     if (-not [string]::IsNullOrWhiteSpace($config.ModelsSourceDir)) {
-        Write-Log "Синхронизирую модели из $($config.ModelsSourceDir)"
-        Sync-Models -SourceDir $config.ModelsSourceDir -TargetDir (Join-Path $config.RepositoryPath "models")
+        Write-Log "Использую внешнюю папку моделей: $modelsDir"
+    }
+    elseif ($modelsDir) {
+        Write-Log "Использую models/ из репозитория: $modelsDir"
+    }
+    else {
+        Write-Log "Папка моделей не найдена. Сборка завершится ошибкой, если потребуются обязательные модели." "WARN"
     }
 
     $appVersion = Get-AppVersion -RepositoryPath $config.RepositoryPath
@@ -252,6 +257,9 @@ function Run-Agent {
     )
     if (-not $config.BuildSetup) {
         $buildArgs += "-SkipNSIS"
+    }
+    if ($modelsDir) {
+        $buildArgs += @("-ModelsDir", $modelsDir)
     }
 
     Write-Log "Запускаю сборку и публикацию версии $appVersion"

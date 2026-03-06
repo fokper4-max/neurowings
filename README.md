@@ -47,7 +47,7 @@ Make sure the build PC has:
 
 - Python installed
 - all dependencies from `requirements.txt`
-- trained models placed in `models/`
+- trained models in a local folder outside Git, preferably `C:\ProgramData\NeuroWingsBuilder\models-source`
 
 Build commands:
 
@@ -58,8 +58,13 @@ python -m PyInstaller installer/NeuroWings.spec
 or:
 
 ```powershell
-powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1
+powershell -ExecutionPolicy Bypass -File installer\build_installer.ps1 -ModelsDir "C:\ProgramData\NeuroWingsBuilder\models-source"
 ```
+
+The automated Windows build server uses `ModelsSourceDir` from
+`installer/setup_windows_builder.ps1` and passes that directory directly to
+PyInstaller. This keeps heavy model weights off GitHub while still producing a
+self-contained EXE for end users.
 
 ## Versioning workflow
 

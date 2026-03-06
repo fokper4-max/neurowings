@@ -89,6 +89,9 @@ cd "C:\NeuroWings 2.0\installer"
 # Сборка с очисткой старых файлов
 .\build_installer.ps1 -Clean
 
+# Сборка с внешней папкой моделей (основной вариант для build-сервера)
+.\build_installer.ps1 -ModelsDir "C:\ProgramData\NeuroWingsBuilder\models-source"
+
 # Пропустить загрузку redistributables (если уже загружены)
 .\build_installer.ps1 -SkipDownload
 

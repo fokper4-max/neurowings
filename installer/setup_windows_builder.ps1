@@ -15,7 +15,7 @@ param(
     [string]$PublishBaseUrl = "https://193-124-117-175.nip.io/downloads/neurowings",
     [string]$GitInstallDir = "$env:ProgramData\NeuroWingsBuilder\tools\git",
     [string]$PythonInstallDir = "C:\Python311",
-    [string]$ModelsSourceDir = "",
+    [string]$ModelsSourceDir = "$env:ProgramData\NeuroWingsBuilder\models-source",
     [string]$TaskName = "NeuroWings Release Agent",
     [string]$TaskUser = "Administrator",
     [string]$TaskPassword
@@ -235,6 +235,65 @@ function Save-EncryptedSecret {
     & icacls.exe $Path /inheritance:r /grant:r "Administrators:F" "SYSTEM:F" | Out-Null
 }
 
+function Test-HasRequiredModels {
+    param([string]$DirectoryPath)
+    if ([string]::IsNullOrWhiteSpace($DirectoryPath) -or -not (Test-Path $DirectoryPath)) {
+        return $false
+    }
+    $requiredFiles = @(
+        "yolo_detect_best.pt",
+        "yolo_pose_best.pt",
+        "stage2_best.pth",
+        "stage2_portable.pth",
+        "subpixel_best.pth"
+    )
+    foreach ($name in $requiredFiles) {
+        if (-not (Test-Path (Join-Path $DirectoryPath $name))) {
+            return $false
+        }
+    }
+    return $true
+}
+
+function Initialize-ModelsSourceDir {
+    param(
+        [string]$SourceDir,
+        [string]$RepositoryPath
+    )
+    if ([string]::IsNullOrWhiteSpace($SourceDir)) {
+        return $null
+    }
+
+    New-Item -ItemType Directory -Path $SourceDir -Force | Out-Null
+
+    $readmePath = Join-Path $SourceDir "README.txt"
+    if (-not (Test-Path $readmePath)) {
+        @"
+NeuroWings build server models directory.
+
+Put the trained model files here:
+- yolo_detect_best.pt
+- yolo_pose_best.pt
+- stage2_best.pth
+- stage2_portable.pth
+- subpixel_best.pth
+
+This folder is outside Git and is used as the primary model source for release builds.
+"@ | Set-Content -Path $readmePath -Encoding UTF8
+    }
+
+    $repoModelsDir = Join-Path $RepositoryPath "models"
+    if ((-not (Test-HasRequiredModels -DirectoryPath $SourceDir)) -and (Test-HasRequiredModels -DirectoryPath $repoModelsDir)) {
+        Write-Info "Копирую модели из репозитория в постоянную внешнюю папку"
+        & robocopy $repoModelsDir $SourceDir /E /R:2 /W:2 /NFL /NDL /NJH /NJS /NP | Out-Null
+        if ($LASTEXITCODE -gt 7) {
+            throw "robocopy завершился с ошибкой ($LASTEXITCODE)"
+        }
+    }
+
+    return (Resolve-Path $SourceDir).Path
+}
+
 Write-Step "Проверка окружения"
 $gitExe = Ensure-Git -InstallDir $GitInstallDir
 $pythonExe = Ensure-Python -InstallDir $PythonInstallDir
@@ -276,6 +335,15 @@ if ($LASTEXITCODE -ne 0) {
 }
 Normalize-InstallerScriptEncoding -RepositoryRoot $RepositoryPath
 Write-Success "Репозиторий синхронизирован"
+
+Write-Step "Подготовка каталога моделей"
+$ModelsSourceDir = Initialize-ModelsSourceDir -SourceDir $ModelsSourceDir -RepositoryPath $RepositoryPath
+if ($ModelsSourceDir) {
+    Write-Success "Каталог моделей готов: $ModelsSourceDir"
+}
+else {
+    Write-Info "Внешний каталог моделей отключен"
+}
 
 Write-Step "Сохранение конфигурации"
 $publishSecretPath = Join-Path $StateDir "publish-server-password.txt"

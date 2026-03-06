@@ -6,7 +6,8 @@ param(
     [switch]$SkipPyInstaller,   # Пропустить PyInstaller
     [switch]$SkipNSIS,          # Пропустить NSIS
     [switch]$Clean,             # Очистить старые сборки перед началом
-    [string]$PythonExe = "python"
+    [string]$PythonExe = "python",
+    [string]$ModelsDir = ""
 )
 
 #Requires -RunAsAdministrator
@@ -51,6 +52,17 @@ function Resolve-PythonExe {
         return $command.Source
     }
     throw "Python не найден: $Candidate"
+}
+
+function Resolve-OptionalDirectory {
+    param([string]$Candidate)
+    if ([string]::IsNullOrWhiteSpace($Candidate)) {
+        return $null
+    }
+    if (Test-Path $Candidate) {
+        return (Resolve-Path $Candidate).Path
+    }
+    throw "Папка не найдена: $Candidate"
 }
 
 function Test-PythonModule {
@@ -174,6 +186,15 @@ if (Test-Path $requirementsFile) {
 }
 else {
     Write-Info "requirements.txt не найден, пропускаем"
+}
+
+$resolvedModelsDir = Resolve-OptionalDirectory -Candidate $ModelsDir
+if ($resolvedModelsDir) {
+    $env:NEUROWINGS_MODELS_DIR = $resolvedModelsDir
+    Write-Info "PyInstaller будет использовать внешнюю папку моделей: $resolvedModelsDir"
+}
+elseif (-not [string]::IsNullOrWhiteSpace($env:NEUROWINGS_MODELS_DIR)) {
+    Write-Info "PyInstaller использует NEUROWINGS_MODELS_DIR=$($env:NEUROWINGS_MODELS_DIR)"
 }
 
 # Сборка с PyInstaller

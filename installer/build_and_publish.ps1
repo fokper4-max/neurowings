@@ -7,6 +7,7 @@ param(
     [switch]$Clean,
     [switch]$SkipBuild,
     [string]$PythonExe = "python",
+    [string]$ModelsDir = "",
     [string]$Headline,
     [string[]]$Note,
     [string]$ServerHost = "193.124.117.175",
@@ -92,6 +93,7 @@ if (-not $SkipBuild) {
     if ($SkipPyInstaller) { $buildParams.SkipPyInstaller = $true }
     if ($SkipNSIS) { $buildParams.SkipNSIS = $true }
     if ($Clean) { $buildParams.Clean = $true }
+    if (-not [string]::IsNullOrWhiteSpace($ModelsDir)) { $buildParams.ModelsDir = $ModelsDir }
 
     & (Join-Path $PSScriptRoot "build_installer.ps1") @buildParams
     if ($LASTEXITCODE -ne 0) {
