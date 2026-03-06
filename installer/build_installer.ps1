@@ -222,7 +222,7 @@ Write-Step "6. Проверка лицензии"
 $licenseFile = Join-Path $ProjectRoot "LICENSE.txt"
 if (-not (Test-Path $licenseFile)) {
     Write-Info "Создание файла лицензии..."
-    @"
+    $licenseText = @"
 MIT License
 
 Copyright (c) 2025 НейроКрылья Team
@@ -244,7 +244,8 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
 SOFTWARE.
-"@ | Out-File -FilePath $licenseFile -Encoding UTF8
+"@
+    $licenseText | Out-File -FilePath $licenseFile -Encoding UTF8
     Write-Success "Файл лицензии создан"
 }
 else {
