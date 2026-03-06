@@ -268,7 +268,7 @@ function Initialize-ModelsSourceDir {
 
     $readmePath = Join-Path $SourceDir "README.txt"
     if (-not (Test-Path $readmePath)) {
-        @"
+        $readmeText = @"
 NeuroWings build server models directory.
 
 Put the trained model files here:
@@ -279,7 +279,8 @@ Put the trained model files here:
 - subpixel_best.pth
 
 This folder is outside Git and is used as the primary model source for release builds.
-"@ | Set-Content -Path $readmePath -Encoding UTF8
+"@
+        $readmeText | Set-Content -Path $readmePath -Encoding UTF8
     }
 
     $repoModelsDir = Join-Path $RepositoryPath "models"
