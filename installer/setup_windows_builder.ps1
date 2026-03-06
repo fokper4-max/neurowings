@@ -268,18 +268,18 @@ function Initialize-ModelsSourceDir {
 
     $readmePath = Join-Path $SourceDir "README.txt"
     if (-not (Test-Path $readmePath)) {
-        $readmeText = @"
-NeuroWings build server models directory.
-
-Put the trained model files here:
-- yolo_detect_best.pt
-- yolo_pose_best.pt
-- stage2_best.pth
-- stage2_portable.pth
-- subpixel_best.pth
-
-This folder is outside Git and is used as the primary model source for release builds.
-"@
+        $readmeText = @(
+            "NeuroWings build server models directory.",
+            "",
+            "Put the trained model files here:",
+            "- yolo_detect_best.pt",
+            "- yolo_pose_best.pt",
+            "- stage2_best.pth",
+            "- stage2_portable.pth",
+            "- subpixel_best.pth",
+            "",
+            "This folder is outside Git and is used as the primary model source for release builds."
+        ) -join [Environment]::NewLine
         $readmeText | Set-Content -Path $readmePath -Encoding UTF8
     }
 
