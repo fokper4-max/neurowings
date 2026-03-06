@@ -12,7 +12,7 @@ from PyQt5.QtGui import QColor
 # =============================================================================
 
 APP_NAME = "НейроКрылья"
-APP_VERSION = "2.0.3"  # Исправление загрузки моделей и устойчивости Windows-сборки
+APP_VERSION = "2.0.4"  # Исправление onefile-упаковки Pillow AVIF и guards по ресурсам
 APP_AUTHOR = "Дмитрий Дубровский"
 APP_MAX_URL = "https://max.ru/u/f9LHodD0cOIbZcReW1B_n2lDumCww_8mo2-Kjv_3dok65ZPHlJWUNkq-MVo"
 APP_TELEGRAM_LABEL = "@NeuroWings_bee"

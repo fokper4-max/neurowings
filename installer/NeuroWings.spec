@@ -103,6 +103,8 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[str(base_dir / 'installer' / 'runtime_hook_torch_dll.py')],
     excludes=[
+        'PIL.AvifImagePlugin',
+        'PIL._avif',
         'matplotlib',  # Если не используется
         'scipy',       # Если не используется
         'pandas',      # Если не используется

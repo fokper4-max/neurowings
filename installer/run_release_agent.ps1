@@ -198,6 +198,12 @@ function Get-SystemLoadSnapshot {
         if ($totalMemoryMB -gt 0) {
             $usedMemoryPercent = [math]::Round((($totalMemoryMB - $freeMemoryMB) * 100.0) / $totalMemoryMB, 1)
         }
+        $systemDrive = if ($env:SystemDrive) { $env:SystemDrive } else { "C:" }
+        $disk = Get-CimInstance Win32_LogicalDisk -Filter ("DeviceID='" + $systemDrive.Replace("'", "''") + "'")
+        $freeDiskMB = 0
+        if ($disk) {
+            $freeDiskMB = [math]::Floor(([double]$disk.FreeSpace) / 1MB)
+        }
 
         $activeBuildProcesses = @(
             Get-CimInstance Win32_Process | Where-Object {
@@ -217,6 +223,7 @@ function Get-SystemLoadSnapshot {
             FreeMemoryMB = $freeMemoryMB
             TotalMemoryMB = $totalMemoryMB
             UsedMemoryPercent = $usedMemoryPercent
+            FreeDiskMB = $freeDiskMB
             ActiveBuildProcesses = $activeBuildProcesses
         }
     }
@@ -230,6 +237,7 @@ function Test-BuildCapacity {
 
     $maxCpuLoadPercent = Get-ConfigIntOrDefault -Value $Config.MaxCpuLoadPercent -DefaultValue 75
     $minAvailableMemoryMB = Get-ConfigIntOrDefault -Value $Config.MinAvailableMemoryMB -DefaultValue 350
+    $minAvailableDiskMB = Get-ConfigIntOrDefault -Value $Config.MinAvailableDiskMB -DefaultValue 6000
     $maxActiveBuildProcesses = Get-ConfigIntOrDefault -Value $Config.MaxActiveBuildProcesses -DefaultValue 0
     $snapshot = Get-SystemLoadSnapshot
     $reasons = @()
@@ -240,6 +248,9 @@ function Test-BuildCapacity {
     if ($snapshot.FreeMemoryMB -lt $minAvailableMemoryMB) {
         $reasons += "RAM free=$($snapshot.FreeMemoryMB)MB < ${minAvailableMemoryMB}MB"
     }
+    if ($snapshot.FreeDiskMB -lt $minAvailableDiskMB) {
+        $reasons += "Disk free=$($snapshot.FreeDiskMB)MB < ${minAvailableDiskMB}MB"
+    }
     if ($snapshot.ActiveBuildProcesses -gt $maxActiveBuildProcesses) {
         $reasons += "active_build_processes=$($snapshot.ActiveBuildProcesses) > $maxActiveBuildProcesses"
     }
@@ -248,6 +259,7 @@ function Test-BuildCapacity {
         Snapshot = $snapshot
         MaxCpuLoadPercent = $maxCpuLoadPercent
         MinAvailableMemoryMB = $minAvailableMemoryMB
+        MinAvailableDiskMB = $minAvailableDiskMB
         MaxActiveBuildProcesses = $maxActiveBuildProcesses
         CanBuild = ($reasons.Count -eq 0)
         Reasons = $reasons
@@ -308,11 +320,12 @@ function Run-Agent {
     Normalize-InstallerScriptEncoding -RepositoryRoot $config.RepositoryPath
 
     $loadSnapshot = Get-SystemLoadSnapshot
-    Write-Log ("Нагрузка сервера: CPU={0}% RAM={1}/{2}MB free ({3}% used) activeBuilds={4}" -f `
+    Write-Log ("Нагрузка сервера: CPU={0}% RAM={1}/{2}MB free ({3}% used) Disk={4}MB free activeBuilds={5}" -f `
         $loadSnapshot.CpuLoadPercent, `
         $loadSnapshot.FreeMemoryMB, `
         $loadSnapshot.TotalMemoryMB, `
         $loadSnapshot.UsedMemoryPercent, `
+        $loadSnapshot.FreeDiskMB, `
         $loadSnapshot.ActiveBuildProcesses)
 
     $appVersion = Get-AppVersion -RepositoryPath $config.RepositoryPath
@@ -378,11 +391,13 @@ function Run-Agent {
 
     $capacity = Test-BuildCapacity -Config $config
     if (-not $capacity.CanBuild) {
-        Write-Log ("Откладываю сборку из-за нагрузки. CPU={0}% (лимит {1}%), freeRAM={2}MB (минимум {3}MB), activeBuilds={4} (лимит {5}). Причины: {6}" -f `
+        Write-Log ("Откладываю сборку из-за нагрузки. CPU={0}% (лимит {1}%), freeRAM={2}MB (минимум {3}MB), freeDisk={4}MB (минимум {5}MB), activeBuilds={6} (лимит {7}). Причины: {8}" -f `
             $capacity.Snapshot.CpuLoadPercent, `
             $capacity.MaxCpuLoadPercent, `
             $capacity.Snapshot.FreeMemoryMB, `
             $capacity.MinAvailableMemoryMB, `
+            $capacity.Snapshot.FreeDiskMB, `
+            $capacity.MinAvailableDiskMB, `
             $capacity.Snapshot.ActiveBuildProcesses, `
             $capacity.MaxActiveBuildProcesses, `
             ($capacity.Reasons -join "; ")) "WARN"

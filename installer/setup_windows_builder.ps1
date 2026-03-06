@@ -8,6 +8,7 @@ param(
     [int]$PollMinutes = 60,
     [int]$MaxCpuLoadPercent = 75,
     [int]$MinAvailableMemoryMB = 350,
+    [int]$MinAvailableDiskMB = 6000,
     [int]$MaxActiveBuildProcesses = 0,
     [switch]$BuildSetup,
     [string]$PublishServerHost = "193.124.117.175",
@@ -369,6 +370,7 @@ $config = [pscustomobject]@{
     BuildSetup = [bool]$BuildSetup
     MaxCpuLoadPercent = $MaxCpuLoadPercent
     MinAvailableMemoryMB = $MinAvailableMemoryMB
+    MinAvailableDiskMB = $MinAvailableDiskMB
     MaxActiveBuildProcesses = $MaxActiveBuildProcesses
     GitExe = $gitExe
     PythonExe = $pythonExe
