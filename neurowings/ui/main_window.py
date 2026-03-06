@@ -678,16 +678,29 @@ class MainWindow(QMainWindow):
         try:
             from ultralytics import YOLO
 
-            # Определяем корневую директорию проекта (родительскую от neurowings/)
-            app_dir = Path(__file__).parent.parent  # neurowings/
-            project_root = app_dir.parent           # корень проекта
-            
-            # Список директорий для поиска моделей (в порядке приоритета)
-            search_dirs = [
-                project_root / "models",      # models/ в корне проекта
-                project_root,                 # корень проекта
-                app_dir,                      # neurowings/ (для обратной совместимости)
-            ]
+            # В сборках PyInstaller модели могут лежать в _MEIPASS, рядом с EXE
+            # или в _internal. Оставляем и старые пути исходников.
+            app_dir = Path(__file__).resolve().parent.parent
+            project_root = app_dir.parent
+
+            base_dirs = []
+            runtime_dir = getattr(sys, "_MEIPASS", "")
+            if runtime_dir:
+                base_dirs.append(Path(runtime_dir))
+            if getattr(sys, "frozen", False):
+                exe_dir = Path(sys.executable).resolve().parent
+                base_dirs.extend([exe_dir, exe_dir / "_internal"])
+            base_dirs.extend([project_root, app_dir])
+
+            search_dirs = []
+            seen_dirs = set()
+            for base_dir in base_dirs:
+                for candidate in (base_dir / "models", base_dir, base_dir / "neurowings"):
+                    candidate_key = str(candidate).lower()
+                    if candidate_key in seen_dirs:
+                        continue
+                    seen_dirs.add(candidate_key)
+                    search_dirs.append(candidate)
             
             # Поиск модели детекции
             for name in ["yolo_detect_best.pt", "detect_best.pt"]:

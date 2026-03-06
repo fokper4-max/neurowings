@@ -23,6 +23,7 @@ param(
 $ErrorActionPreference = "Stop"
 $env:PIP_DISABLE_PIP_VERSION_CHECK = "1"
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
+$ProductName = "НейроКрылья"
 Set-Location $ProjectRoot
 
 function Write-Step {
@@ -105,9 +106,14 @@ Write-Step "Подготовка публикации"
 Ensure-PythonModule -ModuleName "paramiko" -PythonExePath $PythonExe
 
 $version = Get-AppVersion
-$exePath = Join-Path $ProjectRoot "dist\НейроКрылья.exe"
-if (-not (Test-Path $exePath)) {
-    throw "EXE не найден: $exePath"
+$distDir = Join-Path $ProjectRoot "dist"
+$exeCandidates = @(
+    (Join-Path $distDir "$ProductName-$version.exe"),
+    (Join-Path $distDir "$ProductName.exe")
+)
+$exePath = $exeCandidates | Where-Object { Test-Path $_ } | Select-Object -First 1
+if (-not $exePath) {
+    throw "EXE не найден. Проверены пути: $($exeCandidates -join ', ')"
 }
 
 $setupPath = $null

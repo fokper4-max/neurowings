@@ -65,6 +65,31 @@ function Resolve-OptionalDirectory {
     throw "Папка не найдена: $Candidate"
 }
 
+function Remove-DirectoryBestEffort {
+    param(
+        [string]$Path,
+        [int]$Retries = 3,
+        [int]$DelaySeconds = 2
+    )
+    if (-not (Test-Path $Path)) {
+        return $true
+    }
+    for ($attempt = 1; $attempt -le $Retries; $attempt++) {
+        try {
+            Remove-Item $Path -Recurse -Force -ErrorAction Stop
+            return $true
+        }
+        catch {
+            if ($attempt -eq $Retries) {
+                Write-Info "Не удалось удалить $Path после $Retries попыток. Продолжаю без очистки."
+                return $false
+            }
+            Start-Sleep -Seconds $DelaySeconds
+        }
+    }
+    return $false
+}
+
 function Test-PythonModule {
     param(
         [string]$PythonExePath,
@@ -88,6 +113,7 @@ function Get-InstallerVersion {
 # Переходим в корневую директорию проекта
 $ProjectRoot = Split-Path $PSScriptRoot -Parent
 Set-Location $ProjectRoot
+$InstallerVersion = Get-InstallerVersion -NsiPath (Join-Path $PSScriptRoot "installer.nsi")
 
 Write-Step "$ProductName Installer Build Script"
 Write-Host "Project Root: $ProjectRoot" -ForegroundColor Gray
@@ -146,8 +172,9 @@ if ($Clean) {
         $path = Join-Path $ProjectRoot $dir
         if (Test-Path $path) {
             Write-Info "Удаление $dir..."
-            Remove-Item $path -Recurse -Force
-            Write-Success "Удалено: $path"
+            if (Remove-DirectoryBestEffort -Path $path) {
+                Write-Success "Удалено: $path"
+            }
         }
     }
 }
@@ -211,14 +238,29 @@ if (-not $SkipPyInstaller) {
     Write-Info "Запуск PyInstaller..."
     Write-Host "Спецификация: $specFile" -ForegroundColor Gray
 
-    & $PythonExe -m PyInstaller --clean --noconfirm $specFile
+    $buildSessionRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("NeuroWingsBuild-" + (Get-Date -Format "yyyyMMdd-HHmmss") + "-" + [guid]::NewGuid().ToString("N").Substring(0, 8))
+    $workPath = Join-Path $buildSessionRoot "build"
+    $distPath = Join-Path $buildSessionRoot "dist"
+    New-Item -ItemType Directory -Path $workPath -Force | Out-Null
+    New-Item -ItemType Directory -Path $distPath -Force | Out-Null
+
+    Write-Info "Временная директория сборки: $buildSessionRoot"
+    & $PythonExe -m PyInstaller --clean --noconfirm --workpath $workPath --distpath $distPath $specFile
     $pyInstallerExitCode = $LASTEXITCODE
 
     # На Windows некоторые сборки PyInstaller пишут INFO в stderr и могут завершаться
     # с ненулевым кодом, хотя итоговый one-file EXE уже собран корректно.
-    $exePath = Join-Path $ProjectRoot "dist\$ProductName.exe"
-    if (Test-Path $exePath) {
-        $size = [math]::Round((Get-Item $exePath).Length / 1MB, 2)
+    $builtExePath = Join-Path $distPath "$ProductName.exe"
+    $distDir = Join-Path $ProjectRoot "dist"
+    $exePath = Join-Path $distDir "$ProductName.exe"
+    $versionedExePath = Join-Path $distDir "$ProductName-$InstallerVersion.exe"
+    if (Test-Path $builtExePath) {
+        if (-not (Test-Path $distDir)) {
+            New-Item -ItemType Directory -Path $distDir -Force | Out-Null
+        }
+        Copy-Item $builtExePath $exePath -Force
+        Copy-Item $builtExePath $versionedExePath -Force
+        $size = [math]::Round((Get-Item $builtExePath).Length / 1MB, 2)
         if ($pyInstallerExitCode -ne 0) {
             Write-Info "PyInstaller вернул код $pyInstallerExitCode, но EXE уже создан. Продолжаю сборку."
         }
@@ -226,6 +268,8 @@ if (-not $SkipPyInstaller) {
             Write-Success "PyInstaller завершен успешно"
         }
         Write-Success "EXE файл создан: $exePath ($size MB)"
+        Write-Success "Версионный EXE создан: $versionedExePath ($size MB)"
+        Remove-DirectoryBestEffort -Path $buildSessionRoot -Retries 2 -DelaySeconds 1 | Out-Null
     }
     else {
         Write-Error-Custom "PyInstaller завершился с ошибкой (код: $pyInstallerExitCode)"
@@ -286,8 +330,6 @@ if (-not $SkipNSIS) {
 
     Write-Info "Запуск NSIS..."
     Write-Host "Скрипт: $nsiScript" -ForegroundColor Gray
-    $InstallerVersion = Get-InstallerVersion -NsiPath $nsiScript
-
     & $nsisPath $nsiScript
 
     if ($LASTEXITCODE -eq 0) {
