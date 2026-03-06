@@ -19,7 +19,9 @@ from ..core import (
     COLOR_NORMAL, COLOR_YOLO, COLOR_STAGE1, COLOR_STAGE2, COLOR_GT,
     DEFAULT_POINT_RADIUS, YOLO_TO_WINGSDIG,
     WingPoint, BBox, Wing, ImageData, EditMode,
-    get_device, load_stage2_model, load_stage2_portable_model, load_subpixel_model, TORCH_AVAILABLE
+    get_device, load_stage2_model, load_stage2_portable_model, load_subpixel_model,
+    TORCH_AVAILABLE, TORCH_IMPORT_ERROR, TORCHVISION_MODELS_AVAILABLE,
+    TORCHVISION_MODELS_IMPORT_ERROR
 )
 from ..core.update_manager import (
     create_windows_update_script,
@@ -675,6 +677,12 @@ class MainWindow(QMainWindow):
 
     def _load_models(self):
         """Загрузка моделей"""
+        if not TORCH_AVAILABLE:
+            self.statusBar().showMessage(
+                f"PyTorch недоступен: {TORCH_IMPORT_ERROR or 'unknown import error'}"
+            )
+            return
+
         try:
             from ultralytics import YOLO
 
@@ -771,10 +779,14 @@ class MainWindow(QMainWindow):
                 status.append("Stage2-old✓")
             if self.model_subpixel:
                 status.append("SubPixel✓")
+            if not TORCHVISION_MODELS_AVAILABLE:
+                status.append(
+                    f"Stage2 disabled ({TORCHVISION_MODELS_IMPORT_ERROR or 'torchvision.models import failed'})"
+                )
             self.statusBar().showMessage(f"Модели: {' | '.join(status) if status else 'не найдены'}")
             
-        except ImportError:
-            self.statusBar().showMessage("ultralytics не установлен - обработка недоступна")
+        except ImportError as e:
+            self.statusBar().showMessage(f"Импорт модели не удался: {e}")
         except Exception as e:
             print(f"Ошибка загрузки: {e}")
             import traceback

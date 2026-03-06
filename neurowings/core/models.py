@@ -9,14 +9,29 @@ import logging
 
 logger = logging.getLogger("NeuroWings")
 
+TORCH_IMPORT_ERROR = None
+TORCHVISION_MODELS_AVAILABLE = False
+TORCHVISION_MODELS_IMPORT_ERROR = None
+
 try:
     import torch
     import torch.nn as nn
-    from torchvision import models
     TORCH_AVAILABLE = True
 except ImportError as e:
     TORCH_AVAILABLE = False
+    TORCH_IMPORT_ERROR = str(e)
     logger.warning(f"PyTorch не установлен: {e}. Нейросетевые функции недоступны.")
+
+if TORCH_AVAILABLE:
+    try:
+        from torchvision import models as torchvision_models
+        TORCHVISION_MODELS_AVAILABLE = True
+    except ImportError as e:
+        TORCHVISION_MODELS_IMPORT_ERROR = str(e)
+        logger.warning(
+            f"torchvision.models недоступен: {e}. "
+            "Stage2/SubPixel-модели будут отключены, базовая обработка останется доступной."
+        )
 
 
 class Stage2Model(nn.Module):
@@ -29,9 +44,11 @@ class Stage2Model(nn.Module):
     def __init__(self):
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch required for Stage2Model")
+        if not TORCHVISION_MODELS_AVAILABLE:
+            raise ImportError("torchvision.models required for Stage2Model")
 
         super().__init__()
-        resnet = models.resnet34(weights=None)
+        resnet = torchvision_models.resnet34(weights=None)
         self.backbone = nn.Sequential(*list(resnet.children())[:-1])
         self.fc = nn.Sequential(
             nn.Linear(512, 256),
@@ -105,6 +122,12 @@ def load_stage2_model(model_path: str, device):
         Stage2Model или None при ошибке
     """
     if not TORCH_AVAILABLE:
+        return None
+    if not TORCHVISION_MODELS_AVAILABLE:
+        logger.warning(
+            "Stage2 модель отключена: torchvision.models недоступен (%s)",
+            TORCHVISION_MODELS_IMPORT_ERROR or "unknown error",
+        )
         return None
 
     try:
@@ -190,8 +213,10 @@ class Stage2PortableModel(nn.Module):
     def __init__(self):
         if not TORCH_AVAILABLE:
             raise ImportError("PyTorch required for Stage2PortableModel")
+        if not TORCHVISION_MODELS_AVAILABLE:
+            raise ImportError("torchvision.models required for Stage2PortableModel")
         super().__init__()
-        resnet = models.resnet34(weights=None)
+        resnet = torchvision_models.resnet34(weights=None)
         self.bb = nn.Sequential(*list(resnet.children())[:-1])
         self.hd = nn.Sequential(
             nn.Flatten(),
@@ -207,6 +232,12 @@ class Stage2PortableModel(nn.Module):
 def load_stage2_portable_model(model_path: str, device):
     """Загрузить портативную Stage2 модель."""
     if not TORCH_AVAILABLE:
+        return None
+    if not TORCHVISION_MODELS_AVAILABLE:
+        logger.warning(
+            "Stage2 portable отключена: torchvision.models недоступен (%s)",
+            TORCHVISION_MODELS_IMPORT_ERROR or "unknown error",
+        )
         return None
     try:
         model = Stage2PortableModel()

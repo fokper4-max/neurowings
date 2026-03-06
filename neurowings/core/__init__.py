@@ -7,7 +7,9 @@ NeuroWings Core - Ядро приложения
 # Важно: сначала тянем torch (models), затем PyQt (constants), иначе torch падает,
 # если импортировать его после PyQt на Windows.
 from .models import (
-    TORCH_AVAILABLE, get_device, load_stage2_model, load_stage2_portable_model, load_subpixel_model
+    TORCH_AVAILABLE, TORCH_IMPORT_ERROR,
+    TORCHVISION_MODELS_AVAILABLE, TORCHVISION_MODELS_IMPORT_ERROR,
+    get_device, load_stage2_model, load_stage2_portable_model, load_subpixel_model
 )
 
 from .constants import (
@@ -33,7 +35,9 @@ from .data_models import (
 
 __all__ = [
     # models (torch first)
-    'TORCH_AVAILABLE', 'get_device', 'load_stage2_model', 'load_stage2_portable_model', 'load_subpixel_model',
+    'TORCH_AVAILABLE', 'TORCH_IMPORT_ERROR',
+    'TORCHVISION_MODELS_AVAILABLE', 'TORCHVISION_MODELS_IMPORT_ERROR',
+    'get_device', 'load_stage2_model', 'load_stage2_portable_model', 'load_subpixel_model',
     # constants
     'APP_NAME', 'APP_VERSION', 'APP_AUTHOR', 'APP_MAX_URL', 'APP_TELEGRAM_LABEL', 'APP_TELEGRAM_URL',
     'APP_UPDATE_FEED_URL', 'NUM_POINTS',

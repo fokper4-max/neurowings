@@ -69,8 +69,15 @@ hiddenimports = [
     'torch.nn.functional',
     'torch.optim',
     'torch.utils.data',
+    'torch._dynamo.polyfills',
+    'torch._dynamo.polyfills.loader',
+    'torch._dynamo.polyfills.fx',
+    'torch._dynamo.polyfills.tensor',
+    'torch._dynamo.polyfills.pytree',
     # OpenCV зависимости
     'cv2.data',
+    'torchvision.models',
+    'torchvision.transforms',
     # YOLO зависимости
     'ultralytics.models',
     'ultralytics.nn',
@@ -112,6 +119,11 @@ a = Analysis(
         'matplotlib',
         'scipy',
         'pandas',
+        # Keep packaging aligned with the onefile build. NeuroWings does not
+        # need AVIF support, and excluding these optional Pillow pieces avoids
+        # broken onefile startup during archive extraction.
+        'PIL.AvifImagePlugin',
+        'PIL._avif',
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
