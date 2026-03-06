@@ -2,7 +2,7 @@
 ; Упрощенная версия для быстрого создания установщика
 
 !define PRODUCT_NAME "НейроКрылья"
-!define PRODUCT_VERSION "2.0"
+!define PRODUCT_VERSION "2.0.2"
 !define PRODUCT_PUBLISHER "Команда НейроКрылья"
 !define PRODUCT_WEB_SITE "https://github.com/yourusername/neurowings"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
