@@ -25,7 +25,7 @@ from ..core.constants import (
     STAGE2_PORTABLE_ITERATIONS, STAGE2_PORTABLE_MAX_OFFSET
 )
 from ..core.data_models import Wing, WingPoint, BBox
-from ..core.models import TORCH_AVAILABLE
+from ..core.models import TORCH_AVAILABLE, TORCH_IMPORT_ERROR
 
 logger = logging.getLogger("NeuroWings")
 
@@ -34,7 +34,6 @@ KP_Y_CORRECTION = {0: -3.0, 1: -3.0}
 
 if TORCH_AVAILABLE:
     import torch
-    from torchvision import transforms
 
 
 BEST_PIPELINE = ['portable', 'portable', 'mac', 'portable', 'mac', 'mac', 'mac', 'mac']
@@ -62,18 +61,13 @@ class ProcessingWorker(QThread):
     def run(self):
         """Основной метод обработки"""
         if not TORCH_AVAILABLE:
-            self.error.emit("PyTorch не установлен")
+            detail = TORCH_IMPORT_ERROR or "unknown import error"
+            self.error.emit(f"Нейросетевой движок недоступен: {detail}")
             return
 
         try:
             results = {}
             total = len(self.image_paths)
-
-            tf = transforms.Compose([
-                transforms.ToTensor(),
-                transforms.Normalize([0.485, 0.456, 0.406], [0.229, 0.224, 0.225])
-            ])
-            self.tf = tf
 
             for i, path in enumerate(self.image_paths):
                 if self._stop:
@@ -130,14 +124,14 @@ class ProcessingWorker(QThread):
                                         skip_s2 = (kp_idx == 0)
 
                                         s1x, s1y = self._refine_point_stage2_only(
-                                            crop, px, py, tf, crop_w, crop_h, skip_stage2=skip_s2
+                                            crop, px, py, crop_w, crop_h, skip_stage2=skip_s2
                                         )
                                         if kp_idx in KP_Y_CORRECTION:
                                             s1y += KP_Y_CORRECTION[kp_idx]
                                         stage1_refined.append((s1x + x1m, s1y + y1m))
 
                                         s2x, s2y = self._refine_point_full(
-                                            crop, px, py, tf, crop_w, crop_h, skip_stage2=skip_s2
+                                            crop, px, py, crop_w, crop_h, skip_stage2=skip_s2
                                         )
                                         if kp_idx in KP_Y_CORRECTION:
                                             s2y += KP_Y_CORRECTION[kp_idx]
@@ -230,7 +224,18 @@ class ProcessingWorker(QThread):
         # Return patch center in image coordinates
         return patch, (x1 + half, y1 + half)
 
-    def _refine_point_stage2_only(self, img, x, y, tf, w, h, skip_stage2=False):
+    def _prepare_tensor(self, image):
+        """
+        Convert an image patch to normalized NCHW tensor without torchvision.
+        """
+        arr = np.ascontiguousarray(image).astype(np.float32) / 255.0
+        arr = np.transpose(arr, (2, 0, 1))
+        mean = np.array([0.485, 0.456, 0.406], dtype=np.float32)[:, None, None]
+        std = np.array([0.229, 0.224, 0.225], dtype=np.float32)[:, None, None]
+        arr = (arr - mean) / std
+        return torch.from_numpy(arr).unsqueeze(0).to(self.device)
+
+    def _refine_point_stage2_only(self, img, x, y, w, h, skip_stage2=False):
         """
         Refine point using only Stage2 model (for Stage1 display).
         Uses new 2025 logic: direct pixel offset from patch center.
@@ -241,7 +246,7 @@ class ProcessingWorker(QThread):
             patch, (patch_cx, patch_cy) = self._extract_patch(img, cx, cy, STAGE2_CROP_SIZE, w, h)
 
             with torch.no_grad():
-                inp = tf(patch).unsqueeze(0).to(self.device)
+                inp = self._prepare_tensor(patch)
                 offset = self.model_stage2(inp)[0].cpu().numpy()
 
             # NEW LOGIC: add offset to patch center (not to cx, cy!)
@@ -250,7 +255,7 @@ class ProcessingWorker(QThread):
 
         return float(cx), float(cy)
 
-    def _refine_point_full(self, img, x, y, tf, w, h, skip_stage2=False):
+    def _refine_point_full(self, img, x, y, w, h, skip_stage2=False):
         """
         Refine point using full pipeline: Stage2 + SubPixel.
         Uses new 2025 logic: direct pixel offset from patch center.
@@ -262,7 +267,7 @@ class ProcessingWorker(QThread):
             patch, (patch_cx, patch_cy) = self._extract_patch(img, cx, cy, STAGE2_CROP_SIZE, w, h)
 
             with torch.no_grad():
-                inp = tf(patch).unsqueeze(0).to(self.device)
+                inp = self._prepare_tensor(patch)
                 offset = self.model_stage2(inp)[0].cpu().numpy()
 
             # NEW LOGIC: add offset to patch center
@@ -274,7 +279,7 @@ class ProcessingWorker(QThread):
             patch, (patch_cx, patch_cy) = self._extract_patch(img, cx, cy, SUBPIXEL_CROP_SIZE, w, h)
 
             with torch.no_grad():
-                inp = tf(patch).unsqueeze(0).to(self.device)
+                inp = self._prepare_tensor(patch)
                 offset = self.model_subpixel(inp)[0].cpu().numpy()
 
             # Add offset to patch center
@@ -315,7 +320,7 @@ class ProcessingWorker(QThread):
                 crop = cv2.resize(crop, (STAGE2_PORTABLE_CROP_SIZE, STAGE2_PORTABLE_CROP_SIZE))
 
             with torch.no_grad():
-                inp = self.tf(crop).unsqueeze(0).to(self.device)
+                inp = self._prepare_tensor(crop)
                 out = self.model_stage2_portable(inp).cpu().numpy()[0]
 
             offset_x = np.clip(out[0] * STAGE2_PORTABLE_CROP_HALF, -STAGE2_PORTABLE_MAX_OFFSET, STAGE2_PORTABLE_MAX_OFFSET)
