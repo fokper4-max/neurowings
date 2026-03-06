@@ -45,6 +45,21 @@ function Save-Json {
     $Value | ConvertTo-Json -Depth 10 | Set-Content -Path $Path -Encoding UTF8
 }
 
+function Get-ConfigIntOrDefault {
+    param(
+        $Value,
+        [int]$DefaultValue
+    )
+    if ($null -eq $Value) {
+        return $DefaultValue
+    }
+    $parsed = 0
+    if ([int]::TryParse($Value.ToString(), [ref]$parsed)) {
+        return $parsed
+    }
+    return $DefaultValue
+}
+
 function Write-Utf8BomFile {
     param(
         [string]$Path,
@@ -168,6 +183,77 @@ function Resolve-ModelsSourceDir {
     return $null
 }
 
+function Get-SystemLoadSnapshot {
+    try {
+        $os = Get-CimInstance Win32_OperatingSystem
+        $processors = @(Get-CimInstance Win32_Processor)
+        $cpuAverage = 0
+        if ($processors.Count -gt 0) {
+            $cpuAverage = [math]::Round((($processors | Measure-Object -Property LoadPercentage -Average).Average), 0)
+        }
+
+        $freeMemoryMB = [math]::Floor(([double]$os.FreePhysicalMemory) / 1024)
+        $totalMemoryMB = [math]::Floor(([double]$os.TotalVisibleMemorySize) / 1024)
+        $usedMemoryPercent = 0
+        if ($totalMemoryMB -gt 0) {
+            $usedMemoryPercent = [math]::Round((($totalMemoryMB - $freeMemoryMB) * 100.0) / $totalMemoryMB, 1)
+        }
+
+        $activeBuildProcesses = @(
+            Get-CimInstance Win32_Process | Where-Object {
+                $_.ProcessId -ne $PID -and
+                $_.CommandLine -and
+                (
+                    $_.CommandLine -match 'run_release_agent\.ps1' -or
+                    $_.CommandLine -match 'build_and_publish\.ps1' -or
+                    $_.CommandLine -match 'PyInstaller' -or
+                    $_.CommandLine -match 'publish_release\.py'
+                )
+            }
+        ).Count
+
+        return [pscustomobject]@{
+            CpuLoadPercent = $cpuAverage
+            FreeMemoryMB = $freeMemoryMB
+            TotalMemoryMB = $totalMemoryMB
+            UsedMemoryPercent = $usedMemoryPercent
+            ActiveBuildProcesses = $activeBuildProcesses
+        }
+    }
+    catch {
+        throw "Не удалось определить текущую нагрузку сервера: $($_.Exception.Message)"
+    }
+}
+
+function Test-BuildCapacity {
+    param($Config)
+
+    $maxCpuLoadPercent = Get-ConfigIntOrDefault -Value $Config.MaxCpuLoadPercent -DefaultValue 75
+    $minAvailableMemoryMB = Get-ConfigIntOrDefault -Value $Config.MinAvailableMemoryMB -DefaultValue 350
+    $maxActiveBuildProcesses = Get-ConfigIntOrDefault -Value $Config.MaxActiveBuildProcesses -DefaultValue 0
+    $snapshot = Get-SystemLoadSnapshot
+    $reasons = @()
+
+    if ($snapshot.CpuLoadPercent -gt $maxCpuLoadPercent) {
+        $reasons += "CPU=$($snapshot.CpuLoadPercent)% > $maxCpuLoadPercent%"
+    }
+    if ($snapshot.FreeMemoryMB -lt $minAvailableMemoryMB) {
+        $reasons += "RAM free=$($snapshot.FreeMemoryMB)MB < ${minAvailableMemoryMB}MB"
+    }
+    if ($snapshot.ActiveBuildProcesses -gt $maxActiveBuildProcesses) {
+        $reasons += "active_build_processes=$($snapshot.ActiveBuildProcesses) > $maxActiveBuildProcesses"
+    }
+
+    return [pscustomobject]@{
+        Snapshot = $snapshot
+        MaxCpuLoadPercent = $maxCpuLoadPercent
+        MinAvailableMemoryMB = $minAvailableMemoryMB
+        MaxActiveBuildProcesses = $maxActiveBuildProcesses
+        CanBuild = ($reasons.Count -eq 0)
+        Reasons = $reasons
+    }
+}
+
 function Run-Agent {
     $config = Load-JsonOrDefault -Path $ConfigPath -DefaultValue $null
     if ($null -eq $config) {
@@ -220,6 +306,14 @@ function Run-Agent {
         throw "git pull завершился с ошибкой."
     }
     Normalize-InstallerScriptEncoding -RepositoryRoot $config.RepositoryPath
+
+    $loadSnapshot = Get-SystemLoadSnapshot
+    Write-Log ("Нагрузка сервера: CPU={0}% RAM={1}/{2}MB free ({3}% used) activeBuilds={4}" -f `
+        $loadSnapshot.CpuLoadPercent, `
+        $loadSnapshot.FreeMemoryMB, `
+        $loadSnapshot.TotalMemoryMB, `
+        $loadSnapshot.UsedMemoryPercent, `
+        $loadSnapshot.ActiveBuildProcesses)
 
     $appVersion = Get-AppVersion -RepositoryPath $config.RepositoryPath
     $serverPassword = Get-PlainTextFromEncryptedFile -Path $config.PublishPasswordFile
@@ -280,6 +374,19 @@ function Run-Agent {
     }
     else {
         Write-Log "Папка моделей не найдена. Сборка завершится ошибкой, если потребуются обязательные модели." "WARN"
+    }
+
+    $capacity = Test-BuildCapacity -Config $config
+    if (-not $capacity.CanBuild) {
+        Write-Log ("Откладываю сборку из-за нагрузки. CPU={0}% (лимит {1}%), freeRAM={2}MB (минимум {3}MB), activeBuilds={4} (лимит {5}). Причины: {6}" -f `
+            $capacity.Snapshot.CpuLoadPercent, `
+            $capacity.MaxCpuLoadPercent, `
+            $capacity.Snapshot.FreeMemoryMB, `
+            $capacity.MinAvailableMemoryMB, `
+            $capacity.Snapshot.ActiveBuildProcesses, `
+            $capacity.MaxActiveBuildProcesses, `
+            ($capacity.Reasons -join "; ")) "WARN"
+        return
     }
 
     $buildScript = Join-Path $config.RepositoryPath "installer\build_and_publish.ps1"

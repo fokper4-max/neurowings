@@ -6,6 +6,9 @@ param(
     [string]$RepositoryPath = "$env:ProgramData\NeuroWingsBuilder\repo\NeuroWings",
     [string]$StateDir = "$env:ProgramData\NeuroWingsBuilder",
     [int]$PollMinutes = 60,
+    [int]$MaxCpuLoadPercent = 75,
+    [int]$MinAvailableMemoryMB = 350,
+    [int]$MaxActiveBuildProcesses = 0,
     [switch]$BuildSetup,
     [string]$PublishServerHost = "193.124.117.175",
     [int]$PublishServerPort = 22,
@@ -364,6 +367,9 @@ $config = [pscustomobject]@{
     Branch = $Branch
     RepositoryPath = $RepositoryPath
     BuildSetup = [bool]$BuildSetup
+    MaxCpuLoadPercent = $MaxCpuLoadPercent
+    MinAvailableMemoryMB = $MinAvailableMemoryMB
+    MaxActiveBuildProcesses = $MaxActiveBuildProcesses
     GitExe = $gitExe
     PythonExe = $pythonExe
     ModelsSourceDir = $ModelsSourceDir
