@@ -25,13 +25,13 @@ DEFAULT_REMOTE_DIR = "/opt/max-control/public/downloads/neurowings"
 DEFAULT_PUBLIC_BASE_URL = "https://193-124-117-175.nip.io/downloads/neurowings"
 DEFAULT_APP_NAME = "НейроКрылья"
 DOCUMENTATION_FILES = [
-    "README.md",
-    "CHANGELOG.md",
-    "installer/README.md",
-    "installer/UPDATE_GUIDE.md",
-    "installer/CHANGELOG.md",
-    "models/README.txt",
-    "docs/RELEASE_SYSTEM.md",
+    ("README.md", "README.md"),
+    ("CHANGELOG.md", "CHANGELOG.md"),
+    ("installer/README.md", "installer/README.md"),
+    ("installer/UPDATE_GUIDE.md", "installer/UPDATE_GUIDE.md"),
+    ("installer/CHANGELOG.md", "installer/CHANGELOG.md"),
+    ("models/README.txt", "models/README.txt"),
+    ("docs/RELEASE_SYSTEM.md", "RELEASE_SYSTEM.md"),
 ]
 
 
@@ -155,12 +155,12 @@ def build_feed(version: str, download_name: str, setup_name: str | None, headlin
 def collect_documentation_files() -> list[tuple[Path, str]]:
     docs: list[tuple[Path, str]] = []
     missing: list[str] = []
-    for relative in DOCUMENTATION_FILES:
-        path = (PROJECT_ROOT / relative).resolve()
+    for source_relative, target_relative in DOCUMENTATION_FILES:
+        path = (PROJECT_ROOT / source_relative).resolve()
         if not path.exists():
-            missing.append(relative)
+            missing.append(source_relative)
             continue
-        docs.append((path, relative.replace("\\", "/")))
+        docs.append((path, target_relative.replace("\\", "/")))
     if missing:
         raise PublishError(
             "Не найдены обязательные файлы документации: " + ", ".join(missing)
