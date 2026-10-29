@@ -116,7 +116,7 @@ jobs:
               if not isinstance(url, str) or any(c.isspace() for c in url):
                   raise ValueError('Invalid wheel URL')
               parsed = urllib.parse.urlsplit(url)
-              if (parsed.scheme != 'https' or parsed.hostname not in {'files.pythonhosted.org', 'download.pytorch.org'}
+              if (parsed.scheme != 'https' or parsed.hostname not in {'files.pythonhosted.org', 'download.pytorch.org', 'download-r2.pytorch.org'}
                       or parsed.port not in {None, 443} or parsed.username or parsed.password
                       or parsed.query or parsed.fragment or not parsed.path.endswith('.whl')):
                   raise ValueError('Official HTTPS wheel URL required')
@@ -157,7 +157,7 @@ jobs:
                   raise ValueError('Frozen application build dependencies or PyInstaller pin missing')
               for name in ('torch', 'torchvision'):
                   parsed = urllib.parse.urlsplit(indexed[name]['url'])
-                  if parsed.hostname != 'download.pytorch.org' or not parsed.path.startswith('/whl/cpu/'):
+                  if parsed.hostname not in {'download.pytorch.org', 'download-r2.pytorch.org'} or not parsed.path.startswith('/whl/cpu/'):
                       raise ValueError('Exact official CPU-only framework wheels required')
               return {**lock, 'packages': sorted(rows, key=lambda row: row['name'])}
           
