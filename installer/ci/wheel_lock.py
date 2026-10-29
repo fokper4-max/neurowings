@@ -63,9 +63,11 @@ def validate(lock):
         raise ValueError('Duplicate wheel or bootstrap distribution')
     indexed = {row['name']: row for row in rows}
     required = {'pyqt5', 'numpy', 'opencv-python', 'torch', 'torchvision',
-                'ultralytics', 'psutil', 'openai', 'certifi', 'pyinstaller'}
+                'ultralytics', 'psutil', 'openai', 'certifi', 'pyinstaller', 'lap'}
     if not required <= set(indexed) or indexed['pyinstaller']['version'] != '6.22.3':
         raise ValueError('Frozen application build dependencies or PyInstaller pin missing')
+    if indexed['lap']['version'] != '0.5.13':
+        raise ValueError('Observed optional build dependency lap must be locked explicitly')
     for name in ('torch', 'torchvision'):
         parsed = urllib.parse.urlsplit(indexed[name]['url'])
         if parsed.hostname not in {'download.pytorch.org', 'download-r2.pytorch.org'} or not parsed.path.startswith('/whl/cpu/'):

@@ -45,6 +45,8 @@ jobs:
           PIP_CONFIG_FILE: NUL
           PIP_EXTRA_INDEX_URL: ''
           PYTHONHASHSEED: '0'
+          YOLO_AUTOINSTALL: 'false'
+          YOLO_OFFLINE: 'true'
           NEUROWINGS_LOCK_JSON: ${{ inputs.lock_json }}
         run: |
           $ErrorActionPreference = 'Stop'
@@ -152,9 +154,11 @@ jobs:
                   raise ValueError('Duplicate wheel or bootstrap distribution')
               indexed = {row['name']: row for row in rows}
               required = {'pyqt5', 'numpy', 'opencv-python', 'torch', 'torchvision',
-                          'ultralytics', 'psutil', 'openai', 'certifi', 'pyinstaller'}
+                          'ultralytics', 'psutil', 'openai', 'certifi', 'pyinstaller', 'lap'}
               if not required <= set(indexed) or indexed['pyinstaller']['version'] != '6.22.3':
                   raise ValueError('Frozen application build dependencies or PyInstaller pin missing')
+              if indexed['lap']['version'] != '0.5.13':
+                  raise ValueError('Observed optional build dependency lap must be locked explicitly')
               for name in ('torch', 'torchvision'):
                   parsed = urllib.parse.urlsplit(indexed[name]['url'])
                   if parsed.hostname not in {'download.pytorch.org', 'download-r2.pytorch.org'} or not parsed.path.startswith('/whl/cpu/'):
@@ -223,7 +227,7 @@ jobs:
             # Resolve only on the first run, capture actual official wheel URLs+SHA256,
             # then build from a separate clean environment installed by that saved lock.
             Native -Exe $py -Arguments @('-I', '-m', 'pip', 'install', '--only-binary=:all:', '--index-url', 'https://download.pytorch.org/whl/cpu', '--report', (Join-Path $delivery 'cpu-install.json'), 'torch', 'torchvision')
-            Native -Exe $py -Arguments @('-I', '-m', 'pip', 'install', '--only-binary=:all:', '--index-url', 'https://pypi.org/simple', '--report', (Join-Path $delivery 'app-install.json'), '-r', (Join-Path $src 'requirements.txt'), 'pyinstaller==6.22.3')
+            Native -Exe $py -Arguments @('-I', '-m', 'pip', 'install', '--only-binary=:all:', '--index-url', 'https://pypi.org/simple', '--report', (Join-Path $delivery 'app-install.json'), '-r', (Join-Path $src 'requirements.txt'), 'pyinstaller==6.22.3', 'lap==0.5.13')
             Native -Exe $py -Arguments @('-I', '-m', 'pip', 'check')
             $packages = & $py -I -m pip list --format=json
             if ($LASTEXITCODE -ne 0) { throw 'Resolved distribution list failed' }
@@ -246,6 +250,8 @@ jobs:
           [IO.File]::WriteAllText($installedPath, ($packages -join "`n"), [Text.UTF8Encoding]::new($false))
           Native -Exe $py -Arguments @('-I', $lockTool, 'verify', '--lock', $lockPath, '--installed', $installedPath)
           $py = $buildPy
+          # All dependency installation is complete before analysis or GUI startup.
+          $env:PIP_NO_INDEX = '1'
           $emptyModels = Join-Path $root 'empty-models'
           $null = New-Item -ItemType Directory -Path $emptyModels
           $env:NEUROWINGS_MODELS_DIR = $emptyModels
@@ -265,6 +271,12 @@ jobs:
           try {
             Native -Exe $py -Arguments @('-I', '-m', 'PyInstaller', '--noconfirm', '--distpath', $dist, '--workpath', (Join-Path $root 'build'), $spec)
           } finally { Pop-Location }
+          # A package hook must not silently mutate the verified build environment.
+          $packages = & $py -I -m pip list --format=json
+          if ($LASTEXITCODE -ne 0) { throw 'Post-build distribution list failed' }
+          $postBuild = Join-Path $delivery 'post-build-packages.json'
+          [IO.File]::WriteAllText($postBuild, ($packages -join "`n"), [Text.UTF8Encoding]::new($false))
+          Native -Exe $py -Arguments @('-I', $lockTool, 'verify', '--lock', $lockPath, '--installed', $postBuild)
           $executables = @(Get-ChildItem -LiteralPath $dist -Filter '*.exe' -File)
           if ($executables.Count -ne 1 -or $executables[0].Length -eq 0) { throw 'One fresh complete executable required' }
           $exe = $executables[0].FullName
@@ -326,6 +338,17 @@ jobs:
             if (-not $window.CloseMainWindow()) { throw 'Native main window did not accept a normal close request' }
             if (-not $process.WaitForExit(15000)) { throw 'Application did not finish after normal close' }
             if ($process.ExitCode -ne 0) { throw "Native original application exit=$($process.ExitCode)" }
+          } catch {
+            # Own fresh runner logs contain no owner credentials or customer data.
+            # Preserve the real startup failure instead of losing app.stderr.
+            foreach ($logName in @('app.stderr', 'app.stdout')) {
+              $logPath = Join-Path $root $logName
+              if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+                Write-Host ("Original EXE " + $logName + ' tail:')
+                Get-Content -LiteralPath $logPath -Tail 100 -ErrorAction Continue | Write-Host
+              }
+            }
+            throw
           } finally {
             # A failing own application remains network-blocked until runner teardown.
             if (-not $process -or $process.HasExited) {
@@ -354,6 +377,13 @@ jobs:
             clean_saved_wheel_environment_replay_verified = $true
             bit_identical_EXE_rebuild_accepted = $false
             Ubuntu_Windows_VM_acceptance = $false
+          }
+          foreach ($logName in @('app.stderr', 'app.stdout')) {
+            $logPath = Join-Path $root $logName
+            if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+              if ((Get-Item -LiteralPath $logPath).Length -gt 1048576) { throw 'Own application log exceeds delivery bound' }
+              Copy-Item -LiteralPath $logPath -Destination (Join-Path $delivery $logName)
+            }
           }
           $manifest = $summary | ConvertTo-Json -Depth 6
           [IO.File]::WriteAllText((Join-Path $delivery 'build-manifest.json'), $manifest, [Text.UTF8Encoding]::new($false))
