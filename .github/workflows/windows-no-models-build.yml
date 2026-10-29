@@ -260,11 +260,17 @@ jobs:
           $env:YOLO_CONFIG_DIR = Join-Path $root 'ultralytics-settings'
           $env:HF_HUB_OFFLINE = '1'
           $env:TRANSFORMERS_OFFLINE = '1'
+          $env:TORCHVISION_WARN_WHEN_EXTENSION_LOADING_FAILS = '1'
           $spec = Join-Path $src 'installer\NeuroWings.no-models-ci.spec'
           $text = [IO.File]::ReadAllText((Join-Path $src 'installer\NeuroWings.spec'))
           $text = $text.Replace('pyz = PYZ(a.pure, a.zipped_data, cipher=None)', 'pyz = PYZ(a.pure)')
           $text = $text.Replace("    a.zipfiles,`n", '').Replace("    cipher=None,`n", '')
           if ($text.Contains('a.zipped_data') -or $text.Contains('a.zipfiles') -or $text.Contains('cipher=')) { throw 'Expected PyInstaller6 spec conversion failed' }
+          # torchvision 0.29 names its indirectly loaded native extensions *_stable.
+          # The current upstream hook still names only the historical _C module.
+          $oldImports = '    hiddenimports=hiddenimports,'
+          if ([regex]::Matches($text, [regex]::Escape($oldImports)).Count -ne 1) { throw 'Expected exact hiddenimports spec entry' }
+          $text = $text.Replace($oldImports, "    hiddenimports=hiddenimports + ['torchvision._C_stable', 'torchvision.image_stable'],")
           [IO.File]::WriteAllText($spec, $text, [Text.UTF8Encoding]::new($false))
           $dist = Join-Path $root 'dist'
           Push-Location $src
@@ -287,6 +293,9 @@ jobs:
           # All twelve names searched by the unchanged MainWindow._load_models.
           forbidden={'yolo_detect_best.pt','detect_best.pt','yolo_pose_best.pt','pose_best.pt','best.pt','stage2_best.pth','stage2.pth','stage2_portable.pth','stage2_portable_best.pth','stage2_old.pth','subpixel_best.pth','subpixel.pth'}
           r=CArchiveReader(sys.argv[1])
+          names={str(pathlib.PureWindowsPath(n)).replace('\\','/').lower() for n in r.toc}
+          required={'torchvision/_c_stable.pyd','torchvision/image_stable.pyd'}
+          assert required <= names, 'Indirectly loaded torchvision native extensions missing from the executable'
           found=[n for n in r.toc if pathlib.PureWindowsPath(n).name.lower() in forbidden]
           assert not found, 'Trained weights present in the executable'
           print('Bundle contains none of the twelve startup recognition weight filenames')
