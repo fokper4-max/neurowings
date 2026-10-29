@@ -1,0 +1,424 @@
+name: Windows portable EXE without model weights
+
+on:
+  push:
+    branches: ['codex/windows-no-models-build-20261029-a5ea512b']
+    paths:
+      - .github/workflows/windows-no-models-build.yml
+      - installer/ci/wheel_lock.py
+  workflow_dispatch:
+    inputs:
+      lock_json:
+        description: 'Optional dependency-lock.json from a successful run; empty resolves once and then verifies a clean locked environment'
+        required: false
+        type: string
+        default: '' 
+
+# Public source is fetched anonymously. No repository, secret, release, cache,
+# package write or expanded GITHUB_TOKEN permission is granted. One successful
+# EXE plus its exact wheel lock/manifest is retained as a one-day Actions artifact.
+permissions: {}
+
+concurrency:
+  group: windows-no-models-build-02a5
+  cancel-in-progress: false
+
+jobs:
+  build-original-app:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    permissions: {}
+    steps:
+      - name: Install the pinned Windows Python toolchain
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.11.9'
+          architecture: x64
+          token: ''
+          cache: ''
+
+      - name: Build the original application and check its native main window
+        shell: pwsh
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+          PIP_NO_CACHE_DIR: '1'
+          PIP_CONFIG_FILE: NUL
+          PIP_EXTRA_INDEX_URL: ''
+          PYTHONHASHSEED: '0'
+          YOLO_AUTOINSTALL: 'false'
+          YOLO_OFFLINE: 'true'
+          NEUROWINGS_LOCK_JSON: ${{ inputs.lock_json }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          function Native([string]$Exe, [string[]]$Arguments) {
+            & $Exe @Arguments
+            if ($LASTEXITCODE -ne 0) { throw "Native command failed: $Exe, exit $LASTEXITCODE" }
+          }
+          $commit = '02a5a4754794c186ab34a000f055dd7d9a849075'
+          $root = Join-Path $env:RUNNER_TEMP ("neurowings-02a5-" + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $root) { throw 'Fresh job directory already exists' }
+          $null = New-Item -ItemType Directory -Path $root
+          $src = Join-Path $root 'source'
+          Native -Exe git -Arguments @('init', $src)
+          Native -Exe git -Arguments @('-C', $src, 'config', 'core.autocrlf', 'false')
+          Native -Exe git -Arguments @('-C', $src, 'remote', 'add', 'origin', 'https://github.com/fokper4-max/neurowings.git')
+          Native -Exe git -Arguments @('-C', $src, 'fetch', '--depth=1', 'origin', $commit)
+          Native -Exe git -Arguments @('-C', $src, 'checkout', '--detach', 'FETCH_HEAD')
+          $actualCommit = (& git -C $src rev-parse HEAD).Trim()
+          if ($LASTEXITCODE -ne 0 -or $actualCommit -ne $commit) { throw 'Frozen source identity mismatch' }
+          $env:SOURCE_DATE_EPOCH = (& git -C $src show -s --format=%ct HEAD).Trim()
+          if ($LASTEXITCODE -ne 0) { throw 'Source timestamp unavailable' }
+          $pins = @{
+            'run.py' = '059bad47237334737ee90828678498446f289b02dec19b3d244f8085fb00297b'
+            'requirements.txt' = '1ebad4c13c96f66f340365ea3cb7f46daf5418e2d24e18e01daa955c12bff1e4'
+            'neurowings\ui\analysis_widget.py' = 'a938d193c8e48444e4e923bdc76f500a146ae92203053643037e1afc9a9cfecb'
+            'installer\NeuroWings.spec' = 'd327e4d79ef3d7cb29b4f2a5e16d53fff76e34015dfc0240e7839f9f3e5168d1'
+            'installer\runtime_hook_torch_dll.py' = '1fb6abe298581b73ce673a2bf3965ff0c50eb987a54e6b9d88ab65404e9f7677'
+            'neurowings\assets\app_icon.ico' = '527935c67aeb44e0c1068dea3cfe33e6bb883c36276768005658a2dc95bc9217'
+          }
+          foreach ($rel in $pins.Keys) {
+            if ((Get-FileHash -LiteralPath (Join-Path $src $rel) -Algorithm SHA256).Hash.ToLowerInvariant() -ne $pins[$rel]) {
+              throw "Frozen build input mismatch: $rel"
+            }
+          }
+          $delivery = Join-Path $env:RUNNER_TEMP ('neurowings-delivery-' + $env:GITHUB_RUN_ID + '-' + $env:GITHUB_RUN_ATTEMPT)
+          if (Test-Path -LiteralPath $delivery) { throw 'Fresh delivery directory already exists' }
+          $null = New-Item -ItemType Directory -Path $delivery
+          "NEUROWINGS_DELIVERY_DIR=$delivery" >> $env:GITHUB_ENV
+          $lockPath = Join-Path $delivery 'dependency-lock.json'
+          $lockRequirements = Join-Path $delivery 'requirements.lock.txt'
+          $lockTool = Join-Path $delivery 'wheel_lock.py'
+          $lockCode = @'
+          #!/usr/bin/env python3
+          """Capture/replay exact official wheel identities. Never import the application."""
+          import argparse
+          import json
+          from pathlib import Path
+          import re
+          import urllib.parse
+          
+          SOURCE_COMMIT = '02a5a4754794c186ab34a000f055dd7d9a849075'
+          BOOTSTRAP = {'pip', 'setuptools'}
+          
+          def canonical(name):
+              if not isinstance(name, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9._-]*', name):
+                  raise ValueError('Invalid package name')
+              return re.sub(r'[-_.]+', '-', name).lower()
+          
+          def version(value):
+              if not isinstance(value, str) or not re.fullmatch(r'[A-Za-z0-9][A-Za-z0-9.+!_-]*', value):
+                  raise ValueError('Invalid package version')
+              return value
+          
+          def package(row):
+              if set(row) != {'name', 'version', 'url', 'sha256'}:
+                  raise ValueError('Unexpected wheel fields')
+              name, ver = canonical(row['name']), version(row['version'])
+              url = row['url']
+              if not isinstance(url, str) or any(c.isspace() for c in url):
+                  raise ValueError('Invalid wheel URL')
+              parsed = urllib.parse.urlsplit(url)
+              if (parsed.scheme != 'https' or parsed.hostname not in {'files.pythonhosted.org', 'download.pytorch.org', 'download-r2.pytorch.org'}
+                      or parsed.port not in {None, 443} or parsed.username or parsed.password
+                      or parsed.query or parsed.fragment or not parsed.path.endswith('.whl')):
+                  raise ValueError('Official HTTPS wheel URL required')
+              sha = row['sha256']
+              if not isinstance(sha, str) or not re.fullmatch(r'[0-9a-f]{64}', sha):
+                  raise ValueError('Exact SHA256 wheel digest required')
+              return {'name': name, 'version': ver, 'url': url, 'sha256': sha}
+          
+          def installed(path):
+              result = {}
+              for row in json.loads(Path(path).read_text(encoding='utf-8-sig')):
+                  name = canonical(row['name'])
+                  if name in result:
+                      raise ValueError('Duplicate installed distribution')
+                  result[name] = version(row['version'])
+              return result
+          
+          def validate(lock):
+              if set(lock) != {'schema', 'source_commit', 'python', 'platform', 'bootstrap', 'packages'}:
+                  raise ValueError('Unexpected lock fields')
+              if (lock['schema'], lock['source_commit'], lock['python'], lock['platform']) != (1, SOURCE_COMMIT, '3.11.9', 'win_amd64'):
+                  raise ValueError('Lock source/platform binding changed')
+              bootstrap = lock['bootstrap']
+              if not isinstance(bootstrap, dict) or not set(bootstrap) <= BOOTSTRAP:
+                  raise ValueError('Unexpected Python bootstrap distribution')
+              for name, ver in bootstrap.items():
+                  canonical(name); version(ver)
+              if not isinstance(lock['packages'], list) or not 1 <= len(lock['packages']) <= 256:
+                  raise ValueError('Invalid wheel count')
+              rows = [package(row) for row in lock['packages']]
+              names = [row['name'] for row in rows]
+              if len(set(names)) != len(names) or set(names) & set(bootstrap):
+                  raise ValueError('Duplicate wheel or bootstrap distribution')
+              indexed = {row['name']: row for row in rows}
+              required = {'pyqt5', 'numpy', 'opencv-python', 'torch', 'torchvision',
+                          'ultralytics', 'psutil', 'openai', 'certifi', 'pyinstaller', 'lap'}
+              if not required <= set(indexed) or indexed['pyinstaller']['version'] != '6.22.3':
+                  raise ValueError('Frozen application build dependencies or PyInstaller pin missing')
+              if indexed['lap']['version'] != '0.5.13':
+                  raise ValueError('Observed optional build dependency lap must be locked explicitly')
+              for name in ('torch', 'torchvision'):
+                  parsed = urllib.parse.urlsplit(indexed[name]['url'])
+                  if parsed.hostname not in {'download.pytorch.org', 'download-r2.pytorch.org'} or not parsed.path.startswith('/whl/cpu/'):
+                      raise ValueError('Exact official CPU-only framework wheels required')
+              return {**lock, 'packages': sorted(rows, key=lambda row: row['name'])}
+          
+          def capture(reports, installed_path):
+              wheels = {}
+              for report in reports:
+                  data = json.loads(Path(report).read_text(encoding='utf-8-sig'))
+                  for row in data['install']:
+                      info = row['download_info']
+                      meta = row['metadata']
+                      wheel = package({'name': meta['name'], 'version': meta['version'], 'url': info['url'],
+                                       'sha256': info['archive_info']['hashes']['sha256']})
+                      wheels[wheel['name']] = wheel
+              current = installed(installed_path)
+              selected = []
+              bootstrap = {}
+              for name, ver in current.items():
+                  if name in wheels and wheels[name]['version'] == ver:
+                      selected.append(wheels[name])
+                  elif name in BOOTSTRAP:
+                      bootstrap[name] = ver
+                  else:
+                      raise ValueError('Installed distribution has no matching wheel identity')
+              return validate({'schema': 1, 'source_commit': SOURCE_COMMIT, 'python': '3.11.9',
+                               'platform': 'win_amd64', 'bootstrap': bootstrap, 'packages': selected})
+          
+          def verify(lock, installed_path):
+              expected = dict(lock['bootstrap'])
+              expected.update({row['name']: row['version'] for row in lock['packages']})
+              if installed(installed_path) != expected:
+                  raise ValueError('Clean locked environment differs from saved wheel lock')
+          
+          def main():
+              parser = argparse.ArgumentParser()
+              parser.add_argument('mode', choices=['capture', 'render', 'verify'])
+              parser.add_argument('--report', action='append', default=[])
+              parser.add_argument('--installed')
+              parser.add_argument('--lock', required=True)
+              parser.add_argument('--requirements')
+              args = parser.parse_args()
+              if args.mode == 'capture':
+                  lock = capture(args.report, args.installed)
+                  Path(args.lock).write_text(json.dumps(lock, sort_keys=True, indent=2)+'\n', encoding='utf-8')
+              else:
+                  lock = validate(json.loads(Path(args.lock).read_text(encoding='utf-8-sig')))
+              if args.mode == 'verify':
+                  verify(lock, args.installed)
+              else:
+                  if not args.requirements:
+                      parser.error('--requirements required')
+                  text = ''.join(f"{row['name']} @ {row['url']} --hash=sha256:{row['sha256']}\n" for row in lock['packages'])
+                  Path(args.requirements).write_text(text, encoding='utf-8')
+              print(f"Wheel lock {args.mode} accepted: {len(lock['packages'])} exact wheels; no application/model imports")
+          
+          if __name__ == '__main__':
+              main()
+          '@
+          [IO.File]::WriteAllText($lockTool, $lockCode, [Text.UTF8Encoding]::new($false))
+          $venv = Join-Path $root 'resolver-venv'
+          Native -Exe python -Arguments @('-I', '-m', 'venv', $venv)
+          $py = Join-Path $venv 'Scripts\python.exe'
+          if ([string]::IsNullOrWhiteSpace($env:NEUROWINGS_LOCK_JSON)) {
+            # Resolve only on the first run, capture actual official wheel URLs+SHA256,
+            # then build from a separate clean environment installed by that saved lock.
+            Native -Exe $py -Arguments @('-I', '-m', 'pip', 'install', '--only-binary=:all:', '--index-url', 'https://download.pytorch.org/whl/cpu', '--report', (Join-Path $delivery 'cpu-install.json'), 'torch', 'torchvision')
+            Native -Exe $py -Arguments @('-I', '-m', 'pip', 'install', '--only-binary=:all:', '--index-url', 'https://pypi.org/simple', '--report', (Join-Path $delivery 'app-install.json'), '-r', (Join-Path $src 'requirements.txt'), 'pyinstaller==6.22.3', 'lap==0.5.13')
+            Native -Exe $py -Arguments @('-I', '-m', 'pip', 'check')
+            $packages = & $py -I -m pip list --format=json
+            if ($LASTEXITCODE -ne 0) { throw 'Resolved distribution list failed' }
+            $resolved = Join-Path $delivery 'resolved-packages.json'
+            [IO.File]::WriteAllText($resolved, ($packages -join "`n"), [Text.UTF8Encoding]::new($false))
+            Native -Exe $py -Arguments @('-I', $lockTool, 'capture', '--report', (Join-Path $delivery 'cpu-install.json'), '--report', (Join-Path $delivery 'app-install.json'), '--installed', $resolved, '--lock', $lockPath, '--requirements', $lockRequirements)
+          } else {
+            if ($env:NEUROWINGS_LOCK_JSON.Length -gt 60000) { throw 'Dependency lock input is too large' }
+            [IO.File]::WriteAllText($lockPath, $env:NEUROWINGS_LOCK_JSON, [Text.UTF8Encoding]::new($false))
+            Native -Exe $py -Arguments @('-I', $lockTool, 'render', '--lock', $lockPath, '--requirements', $lockRequirements)
+          }
+          $lockedVenv = Join-Path $root 'locked-build-venv'
+          Native -Exe python -Arguments @('-I', '-m', 'venv', $lockedVenv)
+          $buildPy = Join-Path $lockedVenv 'Scripts\python.exe'
+          Native -Exe $buildPy -Arguments @('-I', '-m', 'pip', 'install', '--require-hashes', '--no-deps', '--only-binary=:all:', '-r', $lockRequirements)
+          Native -Exe $buildPy -Arguments @('-I', '-m', 'pip', 'check')
+          $packages = & $buildPy -I -m pip list --format=json
+          if ($LASTEXITCODE -ne 0) { throw 'Locked distribution list failed' }
+          $installedPath = Join-Path $delivery 'locked-packages.json'
+          [IO.File]::WriteAllText($installedPath, ($packages -join "`n"), [Text.UTF8Encoding]::new($false))
+          Native -Exe $py -Arguments @('-I', $lockTool, 'verify', '--lock', $lockPath, '--installed', $installedPath)
+          $py = $buildPy
+          # All dependency installation is complete before analysis or GUI startup.
+          $env:PIP_NO_INDEX = '1'
+          $emptyModels = Join-Path $root 'empty-models'
+          $null = New-Item -ItemType Directory -Path $emptyModels
+          $env:NEUROWINGS_MODELS_DIR = $emptyModels
+          $env:NEUROWINGS_ALLOW_MISSING_MODELS = '1'
+          $env:PYINSTALLER_CONFIG_DIR = Join-Path $root 'pyinstaller-cache'
+          $env:YOLO_CONFIG_DIR = Join-Path $root 'ultralytics-settings'
+          $env:HF_HUB_OFFLINE = '1'
+          $env:TRANSFORMERS_OFFLINE = '1'
+          $env:TORCHVISION_WARN_WHEN_EXTENSION_LOADING_FAILS = '1'
+          $spec = Join-Path $src 'installer\NeuroWings.no-models-ci.spec'
+          $text = [IO.File]::ReadAllText((Join-Path $src 'installer\NeuroWings.spec'))
+          $text = $text.Replace('pyz = PYZ(a.pure, a.zipped_data, cipher=None)', 'pyz = PYZ(a.pure)')
+          $text = $text.Replace("    a.zipfiles,`n", '').Replace("    cipher=None,`n", '')
+          if ($text.Contains('a.zipped_data') -or $text.Contains('a.zipfiles') -or $text.Contains('cipher=')) { throw 'Expected PyInstaller6 spec conversion failed' }
+          # torchvision 0.29 names its indirectly loaded native extensions *_stable.
+          # The current upstream hook still names only the historical _C module.
+          $oldImports = '    hiddenimports=hiddenimports,'
+          if ([regex]::Matches($text, [regex]::Escape($oldImports)).Count -ne 1) { throw 'Expected exact hiddenimports spec entry' }
+          $text = $text.Replace($oldImports, "    hiddenimports=hiddenimports + ['torchvision._C_stable', 'torchvision.image_stable'],")
+          [IO.File]::WriteAllText($spec, $text, [Text.UTF8Encoding]::new($false))
+          $dist = Join-Path $root 'dist'
+          Push-Location $src
+          try {
+            Native -Exe $py -Arguments @('-I', '-m', 'PyInstaller', '--noconfirm', '--distpath', $dist, '--workpath', (Join-Path $root 'build'), $spec)
+          } finally { Pop-Location }
+          # A package hook must not silently mutate the verified build environment.
+          $packages = & $py -I -m pip list --format=json
+          if ($LASTEXITCODE -ne 0) { throw 'Post-build distribution list failed' }
+          $postBuild = Join-Path $delivery 'post-build-packages.json'
+          [IO.File]::WriteAllText($postBuild, ($packages -join "`n"), [Text.UTF8Encoding]::new($false))
+          Native -Exe $py -Arguments @('-I', $lockTool, 'verify', '--lock', $lockPath, '--installed', $postBuild)
+          $executables = @(Get-ChildItem -LiteralPath $dist -Filter '*.exe' -File)
+          if ($executables.Count -ne 1 -or $executables[0].Length -eq 0) { throw 'One fresh complete executable required' }
+          $exe = $executables[0].FullName
+          # Inspect the archive index as build data, without importing the app.
+          $archiveCheck = @'
+          import pathlib,sys
+          from PyInstaller.archive.readers import CArchiveReader
+          # All twelve names searched by the unchanged MainWindow._load_models.
+          forbidden={'yolo_detect_best.pt','detect_best.pt','yolo_pose_best.pt','pose_best.pt','best.pt','stage2_best.pth','stage2.pth','stage2_portable.pth','stage2_portable_best.pth','stage2_old.pth','subpixel_best.pth','subpixel.pth'}
+          r=CArchiveReader(sys.argv[1])
+          names={str(pathlib.PureWindowsPath(n)).replace('\\','/').lower() for n in r.toc}
+          required={'torchvision/_c_stable.pyd','torchvision/image_stable.pyd'}
+          assert required <= names, 'Indirectly loaded torchvision native extensions missing from the executable'
+          found=[n for n in r.toc if pathlib.PureWindowsPath(n).name.lower() in forbidden]
+          assert not found, 'Trained weights present in the executable'
+          print('Bundle contains none of the twelve startup recognition weight filenames')
+          '@
+          Native -Exe $py -Arguments @('-I', '-c', $archiveCheck, $exe)
+          $weightNames = @('yolo_detect_best.pt','detect_best.pt','yolo_pose_best.pt','pose_best.pt','best.pt','stage2_best.pth','stage2.pth','stage2_portable.pth','stage2_portable_best.pth','stage2_old.pth','subpixel_best.pth','subpixel.pth')
+          # The archive index covers _MEIPASS/project_root/app_dir. These are
+          # the remaining exact external search directories from _load_models.
+          $externalModelDirs = foreach ($base in @($dist, (Join-Path $dist '_internal'))) {
+            Join-Path $base 'models'
+            $base
+            Join-Path $base 'neurowings'
+          }
+          foreach ($directory in $externalModelDirs) {
+            foreach ($name in $weightNames) {
+              if (Test-Path -LiteralPath (Join-Path $directory $name)) { throw "Unexpected startup trained weight: $directory/$name" }
+            }
+          }
+          if (Test-Path -LiteralPath (Join-Path $env:USERPROFILE '.neuroWingHybrid_gpt.json')) { throw 'Unexpected preexisting GPT configuration' }
+          $runtime = Join-Path $root 'empty-runtime'
+          $null = New-Item -ItemType Directory -Path $runtime
+          # No network test, update install, LLM request, file opening or recognition.
+          # The source GUI schedules a metadata update check; this own EXE is isolated.
+          $rule = 'NeuroWings-CI-' + $env:GITHUB_RUN_ID
+          New-NetFirewallRule -DisplayName $rule -Direction Outbound -Action Block -Program $exe -Profile Any | Out-Null
+          try {
+            $process = Start-Process -FilePath $exe -WorkingDirectory $runtime -PassThru -RedirectStandardOutput (Join-Path $root 'app.stdout') -RedirectStandardError (Join-Path $root 'app.stderr')
+            $deadline = (Get-Date).AddSeconds(90)
+            $window = $null
+            # Exact frozen MainWindow title (constants.py:14-15/main_window.py:65).
+            $expectedWindowTitle = 'НейроКрылья v2.0.4'
+            do {
+              Start-Sleep -Seconds 2
+              $process.Refresh()
+              $ids = @($process.Id)
+              $children = @(Get-CimInstance Win32_Process -Filter ("ParentProcessId=" + $process.Id))
+              $ids += @($children | Where-Object { $_.ExecutablePath -eq $exe } | ForEach-Object { $_.ProcessId })
+              foreach ($id in $ids) {
+                $candidate = Get-Process -Id $id -ErrorAction SilentlyContinue
+                if ($candidate -and $candidate.MainWindowHandle -ne 0 -and $candidate.MainWindowTitle -ceq $expectedWindowTitle -and $candidate.Responding) { $window = $candidate; break }
+              }
+              if ($process.HasExited -and -not $window) { throw "Original GUI exited before a main window, exit=$($process.ExitCode)" }
+            } until ($window -or (Get-Date) -ge $deadline)
+            if (-not $window) { throw 'Native original main window was not observed' }
+            Write-Host ('Observed native main window: ' + $window.MainWindowTitle)
+            Start-Sleep -Seconds 8
+            $window.Refresh()
+            if ($window.HasExited -or $window.MainWindowHandle -eq 0 -or $window.MainWindowTitle -cne $expectedWindowTitle -or -not $window.Responding) { throw 'Exact original main window did not remain responsive' }
+            if (-not $window.CloseMainWindow()) { throw 'Native main window did not accept a normal close request' }
+            if (-not $process.WaitForExit(15000)) { throw 'Application did not finish after normal close' }
+            if ($process.ExitCode -ne 0) { throw "Native original application exit=$($process.ExitCode)" }
+          } catch {
+            # Own fresh runner logs contain no owner credentials or customer data.
+            # Preserve the real startup failure instead of losing app.stderr.
+            foreach ($logName in @('app.stderr', 'app.stdout')) {
+              $logPath = Join-Path $root $logName
+              if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+                Write-Host ("Original EXE " + $logName + ' tail:')
+                Get-Content -LiteralPath $logPath -Tail 100 -ErrorAction Continue | Write-Host
+              }
+            }
+            throw
+          } finally {
+            # A failing own application remains network-blocked until runner teardown.
+            if (-not $process -or $process.HasExited) {
+              Remove-NetFirewallRule -DisplayName $rule -ErrorAction SilentlyContinue
+            }
+          }
+          Native -Exe git -Arguments @('-C', $src, 'diff', '--exit-code', '--', 'run.py', 'neurowings', 'requirements.txt', 'installer/NeuroWings.spec')
+          $hash = (Get-FileHash -LiteralPath $exe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $summary = [ordered]@{
+            source_commit = $commit
+            python = (& $py --version)
+            pyinstaller = '6.22.3'
+            app_version = '2.0.4'
+            workflow_commit = $env:GITHUB_SHA
+            recipe_url = ('https://github.com/' + $env:GITHUB_REPOSITORY + '/blob/' + $env:GITHUB_SHA + '/.github/workflows/windows-no-models-build.yml')
+            exe_bytes = $executables[0].Length
+            exe_sha256 = $hash
+            original_native_main_window_observed = $true
+            original_application_exit = 0
+            recognition_or_LLM_request_or_trained_weights = $false
+            network_for_original_exe = 'blocked during native main window check'
+            artifact_upload_requested = $true
+            release_or_package_publication = $false
+            retained_downloadable_EXE = 'pending successful artifact upload step'
+            human_visual_GUI_acceptance = $false
+            clean_saved_wheel_environment_replay_verified = $true
+            bit_identical_EXE_rebuild_accepted = $false
+            Ubuntu_Windows_VM_acceptance = $false
+          }
+          foreach ($logName in @('app.stderr', 'app.stdout')) {
+            $logPath = Join-Path $root $logName
+            if (Test-Path -LiteralPath $logPath -PathType Leaf) {
+              if ((Get-Item -LiteralPath $logPath).Length -gt 1048576) { throw 'Own application log exceeds delivery bound' }
+              Copy-Item -LiteralPath $logPath -Destination (Join-Path $delivery $logName)
+            }
+          }
+          $manifest = $summary | ConvertTo-Json -Depth 6
+          [IO.File]::WriteAllText((Join-Path $delivery 'build-manifest.json'), $manifest, [Text.UTF8Encoding]::new($false))
+          Copy-Item -LiteralPath $exe -Destination (Join-Path $delivery $executables[0].Name)
+          [IO.File]::WriteAllText((Join-Path $delivery 'SHA256SUMS'), ($hash + '  ' + $executables[0].Name + "`n"), [Text.UTF8Encoding]::new($false))
+          $manifest | Write-Host
+          'Native Windows build and original-window check completed. Download is accepted only after artifact upload. Ubuntu Windows VM is still unaccepted.' >> $env:GITHUB_STEP_SUMMARY
+
+      - name: Retain the complete EXE and exact rebuild inputs
+        id: deliver
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: NeuroWings-2.0.4-no-models-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.NEUROWINGS_DELIVERY_DIR }}
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+
+      - name: Record the actual artifact download
+        shell: pwsh
+        env:
+          ARTIFACT_URL: ${{ steps.deliver.outputs.artifact-url }}
+          ARTIFACT_ID: ${{ steps.deliver.outputs.artifact-id }}
+          ARTIFACT_DIGEST: ${{ steps.deliver.outputs.artifact-digest }}
+        run: |
+          if ([string]::IsNullOrWhiteSpace($env:ARTIFACT_ID) -or [string]::IsNullOrWhiteSpace($env:ARTIFACT_URL)) { throw 'Artifact delivery was not acknowledged' }
+          "Download (GitHub sign-in required, one-day retention): $env:ARTIFACT_URL" >> $env:GITHUB_STEP_SUMMARY
+          "Artifact ID: $env:ARTIFACT_ID; artifact SHA256: $env:ARTIFACT_DIGEST" >> $env:GITHUB_STEP_SUMMARY
