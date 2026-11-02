@@ -8,7 +8,7 @@ from PyQt5.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsLineItem,
     QGraphicsSimpleTextItem
 )
-from PyQt5.QtCore import Qt
+from PyQt5.QtCore import Qt, QRectF
 from PyQt5.QtGui import QColor, QPen, QBrush, QFont
 
 from ..core.constants import (
@@ -153,7 +153,7 @@ class BBoxItem(QGraphicsRectItem):
         self.label.setBrush(QBrush(QColor(255, 165, 0)))
         font = QFont("Arial", 12, QFont.Bold)
         self.label.setFont(font)
-        self.label.setPos(5, 5)
+        self.label.setPos(x1 + 5, y1 + 5)
         self.label.setZValue(51)
 
         # Ручки для изменения размера
@@ -216,7 +216,7 @@ class BBoxItem(QGraphicsRectItem):
             delta = event.scenePos() - self._resize_start_pos
             r = self._resize_start_rect
 
-            new_rect = r
+            new_rect = QRectF(r)
             if 'l' in self._resize_handle:
                 new_rect.setLeft(r.left() + delta.x())
             if 'r' in self._resize_handle:
@@ -242,7 +242,7 @@ class BBoxItem(QGraphicsRectItem):
             # Сигнализируем об изменении размера
             if hasattr(self.scene(), 'views') and self.scene().views():
                 view = self.scene().views()[0]
-                r = self.rect()
+                r = self.mapRectToScene(self.rect())
                 if hasattr(view, 'bbox_changed'):
                     view.bbox_changed.emit(
                         self.wing_idx,
@@ -253,6 +253,11 @@ class BBoxItem(QGraphicsRectItem):
             event.accept()
         else:
             super().mouseReleaseEvent(event)
+            if self.scene() and self.scene().views():
+                view = self.scene().views()[0]
+                r = self.mapRectToScene(self.rect())
+                if hasattr(view, 'bbox_changed'):
+                    view.bbox_changed.emit(self.wing_idx, r.left(), r.top(), r.right(), r.bottom())
 
     def hoverEnterEvent(self, event):
         self.setPen(QPen(QColor(255, 255, 0), 3, Qt.DashLine))

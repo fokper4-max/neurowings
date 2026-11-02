@@ -174,9 +174,9 @@ class AnalysisWidget(QWidget):
         image_data.analyze_all_wings()
 
         # Собираем данные по ВСЕМ крыльям (как в Excel)
-        ci_values = [w.analysis.CI for w in wings if w.analysis and w.analysis.CI > 0]
-        dsa_values = [w.analysis.DsA for w in wings if w.analysis]
-        hi_values = [w.analysis.HI for w in wings if w.analysis and w.analysis.HI > 0]
+        ci_values = [w.analysis.CI for w in wings if w.analysis and w.analysis.is_valid and w.analysis.CI > 0]
+        dsa_values = [w.analysis.DsA for w in wings if w.analysis and w.analysis.is_valid]
+        hi_values = [w.analysis.HI for w in wings if w.analysis and w.analysis.is_valid and w.analysis.HI > 0]
 
         identified = sum(1 for w in wings if w.analysis and w.analysis.is_identified)
         not_identified = total - identified
@@ -203,7 +203,7 @@ class AnalysisWidget(QWidget):
         cv_hi = 100 * std_hi / abs(mean_hi) if mean_hi != 0 else 0
 
         # Процент Алпатова
-        alpatov_values = [ci_to_alpatov(w.analysis.CI) for w in wings if w.analysis and w.analysis.CI > 0]
+        alpatov_values = [ci_to_alpatov(w.analysis.CI) for w in wings if w.analysis and w.analysis.is_valid and w.analysis.CI > 0]
         mean_alpatov = np.mean(alpatov_values) if alpatov_values else 0
         alpatov_pct = mean_alpatov * 100
 
@@ -290,18 +290,23 @@ class AnalysisWidget(QWidget):
         """Обновить статистику для изображения или списка крыльев"""
         self.current_data = image_data
         self.aggregate_mode = isinstance(image_data, list)
-        aggregate_mode = isinstance(image_data, list)
+        if self.aggregate_mode:
+            from types import SimpleNamespace
+            image_data = SimpleNamespace(wings=image_data, analysis_results={}, analyze_all_wings=lambda: None)
+        aggregate_mode = self.aggregate_mode
         self.analysis_table.setRowCount(0)
         self.results_table.setRowCount(0)
         
-        if (not image_data) or (not aggregate_mode and not image_data.wings) or (aggregate_mode and len(image_data) == 0):
+        if (not image_data) or (not aggregate_mode and not image_data.wings) or (aggregate_mode and len(image_data.wings) == 0):
+            if self.graphs_widget:
+                for graph in (self.graphs_widget.graph_ci, self.graphs_widget.graph_dsa, self.graphs_widget.graph_hi): graph.setText("Нет данных")
             # Очищаем таблицы, если нет данных
             self.analysis_table.setRowCount(0)
             self.results_table.setRowCount(0)
             return
         
         if aggregate_mode:
-            wings = image_data
+            wings = image_data.wings
             total = len(wings)
         else:
             wings = image_data.wings
@@ -311,9 +316,9 @@ class AnalysisWidget(QWidget):
         
         # Собираем данные по ВСЕМ крыльям (как в Excel)
         # Excel рассчитывает средние для всех крыльев, не только для идентифицированных
-        ci_values = [w.analysis.CI for w in wings if w.analysis and w.analysis.CI > 0]
-        dsa_values = [w.analysis.DsA for w in wings if w.analysis]
-        hi_values = [w.analysis.HI for w in wings if w.analysis and w.analysis.HI > 0]
+        ci_values = [w.analysis.CI for w in wings if w.analysis and w.analysis.is_valid and w.analysis.CI > 0]
+        dsa_values = [w.analysis.DsA for w in wings if w.analysis and w.analysis.is_valid]
+        hi_values = [w.analysis.HI for w in wings if w.analysis and w.analysis.is_valid and w.analysis.HI > 0]
         
         identified = sum(1 for w in wings if w.analysis and w.analysis.is_identified)
         not_identified = total - identified
@@ -358,7 +363,7 @@ class AnalysisWidget(QWidget):
 
         self._add_row(3, "Морфометрические показатели:", "")
         # Excel: среднее процентов Алпатова для каждого крыла, а не процент от среднего CI
-        alpatov_values = [ci_to_alpatov(w.analysis.CI) for w in wings if w.analysis and w.analysis.CI > 0]
+        alpatov_values = [ci_to_alpatov(w.analysis.CI) for w in wings if w.analysis and w.analysis.is_valid and w.analysis.CI > 0]
         mean_alpatov = np.mean(alpatov_values) if alpatov_values else 0
         std_alpatov = np.std(alpatov_values, ddof=1) if alpatov_values and len(alpatov_values) > 1 else 0
         sem_alpatov = std_alpatov / np.sqrt(len(alpatov_values)) if alpatov_values else 0
@@ -518,8 +523,8 @@ class AnalysisWidget(QWidget):
         self._add_subrow("для себя (≥5)", "✅ пригодна" if total_score >= 5 else "❌ не пригодна")
         
         # Обновляем графики
-        if self.graphs_widget and ci_values:
-            wing_numbers = list(range(1, total + 1))
+        if self.graphs_widget:
+            wing_numbers = [i+1 for i,w in enumerate(wings) if w.analysis and w.analysis.is_valid]
             self.graphs_widget.update_graphs(ci_values, dsa_values, hi_values, wing_numbers)
         
         # Таблица результатов по крыльям
@@ -565,196 +570,20 @@ class AnalysisWidget(QWidget):
         QApplication.processEvents()
     
     def _export_to_excel(self):
-        """Экспорт в Excel через макрос"""
-        if not self.current_data:
+        """Export the displayed analysis without changing the project or TPS."""
+        if not self.aggregate_mode and not self.current_data:
             QMessageBox.warning(self, "Ошибка", "Нет данных для экспорта")
             return
-        
-        # Сохраняем TPS файл
-        try:
-            # Используем callback для сохранения TPS, если он установлен
-            if self.save_tps_callback:
-                self.save_tps_callback(self.current_data)
-            else:
-                # Попытка найти метод сохранения через родительское окно
-                parent = self.parent()
-                while parent and not hasattr(parent, '_save_tps'):
-                    parent = parent.parent()
-                
-                if parent and hasattr(parent, '_save_tps'):
-                    parent._save_tps(self.current_data)
-                else:
-                    # Сохраняем напрямую, если не нашли метод
-                    tps_path = self.current_data.path.with_suffix('.tps')
-                    self._save_tps_direct(self.current_data, tps_path)
-            
-            # Путь к шаблону Excel с макросом
-            excel_template = Path(__file__).parent.parent / 'kr.xlsm'
-            if not excel_template.exists():
-                QMessageBox.warning(self, "Ошибка", f"Файл шаблона Excel не найден:\n{excel_template}")
-                return
-            
-            # Имя выходного файла (имя фото/пробы)
-            tps_path = self.current_data.path.with_suffix('.tps')
-            output_excel_path = self.current_data.path.with_suffix('.xlsx')
-            
-            # Выполняем экспорт через макрос Excel в фоновом режиме
-            QApplication.processEvents()  # Обновляем UI перед началом
-            self._export_via_macro(excel_template, tps_path, output_excel_path)
-            
-        except Exception as e:
-            QMessageBox.critical(self, "Ошибка", f"Ошибка экспорта: {str(e)}\n\nУбедитесь, что:\n1. Microsoft Excel установлен\n2. Файл kr.xlsm доступен\n3. Макрос включен в Excel")
-    
-    def _save_tps_direct(self, img_data, tps_path: Path):
-        """Прямое сохранение TPS файла в формате WingsDig"""
-        from ..core.constants import NUM_POINTS
-        
-        if not img_data.wings:
+        default = "aggregate.xlsx" if self.aggregate_mode else str(self.current_data.path.with_suffix('.xlsx'))
+        path, _ = QFileDialog.getSaveFileName(self, "Экспорт анализа", default, "Excel (*.xlsx)")
+        if not path:
             return
-        
-        lines = [f"LM={len(img_data.wings) * NUM_POINTS}"]
-        
-        for wing in img_data.wings:
-            points = wing.get_active_points()
-            for px, py in points:
-                # Инвертируем Y обратно в TPS формат
-                y_tps = img_data.height - py  # TPS/WingsDig: Y отсчитывается снизу
-                # WingsDig сохраняет целые координаты для совместимости с Excel макросом
-                # Округляем до целых, но форматируем с .00000 для совместимости
-                px_rounded = round(px)
-                y_tps_rounded = round(y_tps)
-                coord_str = f"{px_rounded:.5f} {y_tps_rounded:.5f}".replace('.', ',')
-                lines.append(coord_str)
-        
-        lines.append(f"IMAGE={img_data.path.name}")
-        lines.append("ID=1")  # WingsDig использует ID=1
-        
-        # Сохраняем с CRLF переносами строк и завершающим переносом
-        with open(tps_path, 'w', newline='', encoding='utf-8') as f:
-            f.write('\r\n'.join(lines))
-            f.write('\r\n')  # Завершающий перенос строки
-        
-        img_data.is_modified = False
-    
-    def _export_via_macro(self, excel_template: Path, tps_path: Path, output_path: Path):
-        """Выполнить экспорт через Excel макрос"""
         try:
-            if platform.system() == 'Darwin':  # macOS
-                self._export_via_macro_macos(excel_template, tps_path, output_path)
-            else:
-                # Для других ОС - используем старый метод
-                self._do_export(str(output_path))
-                QMessageBox.information(self, "Успех", f"Экспортировано:\n{output_path}")
-        except Exception as e:
-            raise Exception(f"Ошибка выполнения макроса: {str(e)}")
-    
-    def _export_via_macro_macos(self, excel_template: Path, tps_path: Path, output_path: Path):
-        """Выполнить экспорт через Excel макрос на macOS (в тихом режиме)"""
-        import os
-        import tempfile
-        import shutil
-        
-        # Копируем шаблон во временную папку для работы
-        temp_dir = Path(tempfile.gettempdir())
-        temp_excel = temp_dir / f"neurowings_temp_{int(time.time())}.xlsm"
-        
-        try:
-            # Копируем шаблон
-            shutil.copy2(excel_template, temp_excel)
-            
-            # Создаем AppleScript для автоматизации Excel в тихом режиме
-            # Предполагаем, что макрос открывает TPS файл или обрабатывает его при открытии
-            applescript = f'''
-            tell application "Microsoft Excel"
-                -- Открываем Excel файл с макросом
-                set wb to open workbook workbook file name POSIX file "{temp_excel.absolute()}"
-                
-                -- Ждем загрузки
-                delay 1
-                
-                -- Пытаемся открыть TPS файл (если макрос этого не делает автоматически)
-                -- Это зависит от логики макроса - возможно, макрос сам открывает TPS
-                try
-                    -- Вариант 1: Макрос обрабатывает TPS при открытии Excel
-                    -- В этом случае просто открываем TPS как файл
-                    -- open POSIX file "{tps_path.absolute()}"
-                    
-                    -- Вариант 2: Нужно запустить макрос вручную
-                    -- Имя макроса нужно уточнить - возможно "ProcessTPS", "OpenTPS", "Main" и т.д.
-                    -- Пробуем несколько вариантов
-                    try
-                        run VB macro macro name "ProcessTPS"
-                    on error
-                        try
-                            run VB macro macro name "Main"
-                        on error
-                            try
-                                run VB macro macro name "Auto_Open"
-                            end try
-                        end try
-                    end try
-                    
-                    -- Ждем обработки макросом
-                    delay 3
-                    
-                    -- Сохраняем результат с новым именем
-                    save workbook workbook wb as POSIX file "{output_path.absolute()}" file format Excel macro enabled workbook format
-                    
-                    delay 1
-                    
-                    -- Закрываем без сохранения оригинала (temp файл)
-                    close workbook wb saving no
-                    
-                on error errMsg
-                    -- Закрываем в случае ошибки
-                    try
-                        close workbook wb saving no
-                    end try
-                    error "Ошибка при выполнении макроса: " & errMsg
-                end try
-            end tell
-            '''
-            
-            # Выполняем AppleScript (тихий режим - окно Excel может появиться, но быстро закроется)
-            process = subprocess.Popen(
-                ['osascript', '-'],
-                stdin=subprocess.PIPE,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE,
-                text=True
-            )
-            
-            stdout, stderr = process.communicate(input=applescript, timeout=60)
-            
-            if process.returncode != 0:
-                error_msg = stderr if stderr else stdout
-                raise Exception(f"Ошибка выполнения макроса Excel:\n{error_msg}\n\nУбедитесь, что:\n- Microsoft Excel установлен\n- Макрос включен в настройках Excel")
-            
-            # Проверяем, что файл создан
-            if output_path.exists():
-                QMessageBox.information(
-                    self, 
-                    "Экспорт успешен", 
-                    f"Файл Excel успешно создан:\n{output_path.name}\n\n"
-                    f"Путь: {output_path.parent}"
-                )
-            else:
-                raise Exception(f"Файл Excel не был создан.\nПроверьте, что макрос в kr.xlsm правильно обрабатывает TPS файл.\nОжидаемый путь: {output_path}")
-                
-        except subprocess.TimeoutExpired:
-            if 'process' in locals():
-                process.kill()
-            raise Exception("Превышено время ожидания выполнения макроса (60 секунд)")
-        except Exception as e:
-            raise
-        finally:
-            # Удаляем временный файл
-            if temp_excel.exists():
-                try:
-                    temp_excel.unlink()
-                except:
-                    pass
-    
+            self._do_export(path)
+            QMessageBox.information(self, "Успех", f"Экспортировано:\n{path}")
+        except Exception as exc:
+            QMessageBox.critical(self, "Ошибка экспорта", str(exc))
+
     def _do_export(self, path):
         """Выполнить экспорт"""
         try:
@@ -788,4 +617,13 @@ class AnalysisWidget(QWidget):
                 if item:
                     ws2.cell(row + 2, col + 1, item.text())
         
-        wb.save(path)
+        import os, tempfile
+        target = Path(path)
+        fd, temporary = tempfile.mkstemp(dir=target.parent, prefix=target.name, suffix='.xlsx')
+        os.close(fd)
+        try:
+            wb.save(temporary)
+            os.replace(temporary, target)
+        finally:
+            if os.path.exists(temporary):
+                os.unlink(temporary)

@@ -31,6 +31,8 @@ def _version_key(version: str) -> tuple:
 
 def is_newer_version(remote_version: str, local_version: str) -> bool:
     """Return True if remote_version is newer than local_version."""
+    if not re.fullmatch(r"v?\d+(?:\.\d+)*", remote_version):
+        return False
     remote = _version_key(remote_version)
     local = _version_key(local_version)
     size = max(len(remote), len(local))
@@ -87,7 +89,8 @@ def normalize_update_info(payload: dict, feed_url: str = "") -> dict:
 
 def is_direct_download_url(url: str) -> bool:
     """Return True when URL points directly to an EXE file."""
-    return urlparse(url).path.lower().endswith(".exe")
+    parsed = urlparse(url)
+    return parsed.scheme == "https" and bool(parsed.hostname) and parsed.path.lower().endswith(".exe")
 
 
 def _sha256(path: Path) -> str:
@@ -112,6 +115,9 @@ def download_update(info: dict, destination: Path, progress_callback=None, timeo
     if not is_direct_download_url(download_url):
         raise UpdateError("Ссылка на обновление должна вести прямо на .exe файл.")
 
+    expected = info.get("sha256", "")
+    if not re.fullmatch(r"[a-fA-F0-9]{64}", expected):
+        raise UpdateError("Для обновления обязательна корректная SHA256.")
     destination.parent.mkdir(parents=True, exist_ok=True)
     temp_path = destination.with_suffix(destination.suffix + ".part")
 
@@ -130,15 +136,15 @@ def download_update(info: dict, destination: Path, progress_callback=None, timeo
             if progress_callback:
                 progress_callback(downloaded, total_bytes)
 
-    temp_path.replace(destination)
 
     expected_sha256 = info.get("sha256", "").strip().lower()
     if expected_sha256:
-        actual_sha256 = _sha256(destination)
+        actual_sha256 = _sha256(temp_path)
         if actual_sha256 != expected_sha256:
-            destination.unlink(missing_ok=True)
+            temp_path.unlink(missing_ok=True)
             raise UpdateError("Контрольная сумма обновления не совпадает.")
 
+    temp_path.replace(destination)
     return destination
 
 
@@ -162,7 +168,11 @@ for ($i = 0; $i -lt 600; $i++) {{
     Start-Sleep -Milliseconds 500
 }}
 
-Copy-Item -LiteralPath $source -Destination $target -Force
+if (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ throw 'Application is still running' }}
+$backup = $target + '.previous'
+Copy-Item -LiteralPath $target -Destination $backup -Force
+try {{ Copy-Item -LiteralPath $source -Destination $target -Force }}
+catch {{ Copy-Item -LiteralPath $backup -Destination $target -Force; throw }}
 Start-Process -FilePath $target
 Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
 """

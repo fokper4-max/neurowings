@@ -35,6 +35,10 @@ class ScalableGraphLabel(QLabel):
         self._pixmap = pixmap
         self._update_scaled_pixmap()
     
+    def setText(self, text):
+        self._pixmap = None
+        super().setText(text)
+
     def resizeEvent(self, event):
         super().resizeEvent(event)
         self._update_scaled_pixmap()
@@ -127,7 +131,7 @@ class GraphsWidget(QWidget):
                 for wing_idx, val in enumerate(values):
                     for i in range(len(bins) - 1):
                         if bins[i] <= val < bins[i + 1] or (i == len(bins) - 2 and val == bins[i + 1]):
-                            bin_wings[i].append(wing_idx + 1)
+                            bin_wings[i].append(wing_numbers[wing_idx] if wing_numbers and wing_idx < len(wing_numbers) else wing_idx + 1)
                             break
 
                 for i, (count, patch) in enumerate(zip(n, patches)):
@@ -188,4 +192,5 @@ class GraphsWidget(QWidget):
             create_histogram(hi_values, 'ГАНТЕЛЬНЫЙ ИНДЕКС', 'HI', hi_ranges, self.graph_hi, '#f5b041')
             
         except Exception as e:
-            self.graph_ci.setText(f"Ошибка построения графиков: {e}")
+            for graph in (self.graph_ci,self.graph_dsa,self.graph_hi):
+                graph.setText(f"Ошибка построения графиков: {e}")

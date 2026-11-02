@@ -17,6 +17,7 @@ from __future__ import annotations
 
 from typing import List, Tuple, Dict, Optional
 import numpy as np
+import math
 import logging
 
 from .constants import BREEDS, INDEX_POINTS
@@ -240,7 +241,7 @@ def calculate_breed_probability(
         return 0.0
 
     def _mean_stdev(values: List[float]) -> Tuple[float, float]:
-        vals = [float(v) for v in values if v is not None and float(v) != 0.0]
+        vals = [float(v) for v in values if v is not None and math.isfinite(float(v))]
         if not vals:
             return 0.0, 0.0
         mean = float(np.mean(vals))
@@ -272,7 +273,7 @@ def calculate_breed_probability(
 
     fam_vol = (ci_hi - ci_lo) * (dsa_hi - dsa_lo) * (hi_hi - hi_lo)
     if fam_vol <= 0:
-        return 0.0
+        return float(all(BREED_RANGES[breed_name][key][0] <= value <= BREED_RANGES[breed_name][key][1] for key,value in [("CI",ci_mean),("DsA",dsa_mean),("HI",hi_mean)]))
 
     br = BREED_RANGES[breed_name]
     ov_ci = _overlap(ci_lo, ci_hi, br['CI'][0], br['CI'][1])
@@ -322,7 +323,7 @@ def calculate_hybridization_score(
     breed_min, breed_max = breed_range
 
     # Фильтруем валидные значения
-    valid_values = [float(v) for v in values if v is not None and float(v) != 0.0]
+    valid_values = [float(v) for v in values if v is not None and math.isfinite(float(v))]
     if not valid_values:
         return 0
 
@@ -335,7 +336,7 @@ def calculate_hybridization_score(
 
     # Если все значения одинаковые - нет гибридизации
     if abs(max_val - min_val) < 1e-10:
-        return 3
+        return 3 if breed_min <= min_val <= breed_max else 0
 
     num_bins = 30
     bin_width = (max_val - min_val) / num_bins
@@ -361,82 +362,14 @@ def calculate_hybridization_score(
                     bin_counts[i] += 1
                     break
 
-    # Определяем, какая граница породы критична (верхняя или нижняя)
-    # Смотрим, с какой стороны больше крыльев выходит за границу
-    mean_val = np.mean(valid_values)
-
-    # Для анализа берём ту границу, которая ближе к среднему значению
-    # (это та граница, которую крылья могут нарушить)
-    if abs(mean_val - breed_min) < abs(mean_val - breed_max):
-        # Средняя ближе к нижней границе - анализируем выход вниз
-        critical_boundary = breed_min
-        beyond_boundary = [v for v in valid_values if v < critical_boundary]
-    else:
-        # Средняя ближе к верхней границе - анализируем выход вверх
-        critical_boundary = breed_max
-        beyond_boundary = [v for v in valid_values if v > critical_boundary]
-
-    # Если нет крыльев за границей - отлично
-    if not beyond_boundary:
-        return 3
-
-    # Находим класс, в котором находится критическая граница
-    boundary_bin = -1
-    for i, (bin_start, bin_end) in enumerate(bins):
-        if bin_start <= critical_boundary <= bin_end:
-            boundary_bin = i
-            break
-
-    if boundary_bin == -1:
-        # Граница вне диапазона - все крылья либо внутри, либо снаружи
-        if beyond_boundary:
-            pct_beyond = 100.0 * len(beyond_boundary) / total_wings
-            if pct_beyond > 2:
-                return 0  # Гибрид
-            elif pct_beyond > 1:
-                return 1  # Допустимая
-            else:
-                return 2  # Несущественная
-        return 3
-
-    # Определяем направление анализа (выше или ниже границы)
-    if critical_boundary == breed_min:
-        # Анализируем крылья ниже минимума (индексы < boundary_bin)
-        rank2_bins = []  # 2-й ранг: дальше 3 классов от границы
-        rank1_bins = []  # 1-й ранг: в пределах 3 классов от границы
-
-        for i in range(boundary_bin):
-            distance_from_boundary = boundary_bin - i
-            if distance_from_boundary > 3:
-                rank2_bins.append(i)
-            else:
-                rank1_bins.append(i)
-    else:
-        # Анализируем крылья выше максимума (индексы > boundary_bin)
-        rank2_bins = []
-        rank1_bins = []
-
-        for i in range(boundary_bin + 1, num_bins):
-            distance_from_boundary = i - boundary_bin
-            if distance_from_boundary > 3:
-                rank2_bins.append(i)
-            else:
-                rank1_bins.append(i)
-
-    # Считаем крылья в рангах
-    rank2_count = sum(bin_counts[i] for i in rank2_bins)
-    rank1_count = sum(bin_counts[i] for i in rank1_bins)
-
-    # Проценты
-    pct_rank2 = 100.0 * rank2_count / total_wings if total_wings > 0 else 0.0
-    pct_rank1 = 100.0 * rank1_count / total_wings if total_wings > 0 else 0.0
-
-    # Определяем степень гибридизации по таблице Excel
-    if pct_rank2 > 2 or pct_rank1 > 15:
-        return 0  # ГИБРИД
-    elif pct_rank2 > 1 or pct_rank1 > 7.5:
-        return 1  # Допустимая
-    elif pct_rank2 > 0 or pct_rank1 > 0:
-        return 2  # Несущественная
-    else:
-        return 3  # Отсутствует
+    rank1 = rank2 = 0
+    for value in valid_values:
+        distance = max(breed_min-value, value-breed_max, 0)
+        if distance > 3*bin_width: rank2 += 1
+        elif distance > 0: rank1 += 1
+    pct_rank2=100*rank2/total_wings
+    pct_rank1=100*rank1/total_wings
+    if pct_rank2 > 2 or pct_rank1 > 15: return 0
+    if pct_rank2 > 1 or pct_rank1 > 7.5: return 1
+    if pct_rank2 > 0 or pct_rank1 > 0: return 2
+    return 3

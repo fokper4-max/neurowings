@@ -22,12 +22,14 @@ from pathlib import Path
 
 
 BASE_DIR = Path(__file__).resolve().parent
-LOG_FILE = BASE_DIR / "neurowings.log"
+LOG_DIR = Path(os.getenv("LOCALAPPDATA", str(Path.home() / ".local" / "state"))) / "NeuroWings"
+LOG_DIR.mkdir(parents=True, exist_ok=True)
+LOG_FILE = LOG_DIR / "neurowings.log"
 
 # Настройка логирования с обработкой ошибок
 try:
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
@@ -38,7 +40,7 @@ try:
 except (PermissionError, OSError) as e:
     # Fallback: только консольное логирование
     logging.basicConfig(
-        level=logging.DEBUG,
+        level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[logging.StreamHandler(sys.stdout)],
@@ -185,19 +187,22 @@ def _import_torch() -> None:
             "Install vc_redist.x64.exe and retry."
         )
         logger.critical(traceback.format_exc())
-        sys.exit(1)
+        return False
 
 
 def main():
+    if "--recognize" in sys.argv:
+        from neurowings.batch_cli import main as batch_main
+        return batch_main(sys.argv[1:])
     _install_excepthook()
     _log_startup()
 
     # Очищаем только кеш neurowings (не всего BASE_DIR - там может быть PyTorch)
     neurowings_dir = BASE_DIR / "neurowings"
     if neurowings_dir.exists():
-        _clean_cache(neurowings_dir)
+        pass  # Release startup never deletes source/cache files
         # Логируем только структуру neurowings, не всего проекта (иначе PyTorch = часы ожидания)
-        _log_tree(neurowings_dir, max_depth=10)
+        pass  # Avoid expensive startup tree scans
     else:
         logger.warning(f"Директория neurowings не найдена: {neurowings_dir}")
 
@@ -246,6 +251,8 @@ def main():
         sys.exit(1)
 
     # Приложение
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
     app = SafeApplication(sys.argv)
     app.setApplicationName("НейроКрылья")
     icon_path = _resolve_app_icon()
@@ -287,7 +294,7 @@ def main():
 
 if __name__ == "__main__":
     try:
-        main()
+        sys.exit(main())
     except Exception:
         logger.critical("FATAL ERROR:")
         logger.critical(traceback.format_exc())

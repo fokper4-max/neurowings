@@ -10,6 +10,7 @@ import hashlib
 import json
 import os
 import posixpath
+import uuid
 import re
 import sys
 from datetime import date
@@ -218,32 +219,24 @@ def sftp_mkdir_p(sftp, remote_dir: str) -> None:
 
 
 def sftp_upload_bytes(sftp, remote_path: str, payload: bytes) -> None:
-    temp_path = f"{remote_path}.tmp"
+    temp_path = f"{remote_path}.{uuid.uuid4().hex}.tmp"
     try:
         sftp.remove(temp_path)
     except OSError:
         pass
     with sftp.file(temp_path, "wb") as remote_file:
         remote_file.write(payload)
-    try:
-        sftp.remove(remote_path)
-    except OSError:
-        pass
-    sftp.rename(temp_path, remote_path)
+    sftp.posix_rename(temp_path, remote_path)
 
 
 def sftp_upload_file(sftp, local_path: Path, remote_path: str) -> None:
-    temp_path = f"{remote_path}.tmp"
+    temp_path = f"{remote_path}.{uuid.uuid4().hex}.tmp"
     try:
         sftp.remove(temp_path)
     except OSError:
         pass
     sftp.put(str(local_path), temp_path)
-    try:
-        sftp.remove(remote_path)
-    except OSError:
-        pass
-    sftp.rename(temp_path, remote_path)
+    sftp.posix_rename(temp_path, remote_path)
 
 
 def upload_documentation(sftp, remote_dir: str, public_base_url: str, version: str) -> dict:
@@ -357,7 +350,8 @@ def publish(args) -> None:
 
     paramiko = ensure_paramiko()
     client = paramiko.SSHClient()
-    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.load_system_host_keys()
+    client.set_missing_host_key_policy(paramiko.RejectPolicy())
     client.connect(
         hostname=args.server_host,
         port=args.server_port,

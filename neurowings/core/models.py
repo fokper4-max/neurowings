@@ -6,6 +6,8 @@ NeuroWings - Нейросетевые модели
 """
 
 import logging
+import hashlib, json
+from pathlib import Path
 
 logger = logging.getLogger("NeuroWings")
 
@@ -17,7 +19,7 @@ try:
     import torch
     import torch.nn as nn
     TORCH_AVAILABLE = True
-except ImportError as e:
+except (ImportError, OSError, RuntimeError) as e:
     TORCH_AVAILABLE = False
     TORCH_IMPORT_ERROR = str(e)
     logger.warning(f"PyTorch не установлен: {e}. Нейросетевые функции недоступны.")
@@ -26,7 +28,7 @@ if TORCH_AVAILABLE:
     try:
         from torchvision import models as torchvision_models
         TORCHVISION_MODELS_AVAILABLE = True
-    except ImportError as e:
+    except (ImportError, OSError, RuntimeError) as e:
         TORCHVISION_MODELS_IMPORT_ERROR = str(e)
         logger.warning(
             f"torchvision.models недоступен: {e}. "
@@ -34,7 +36,7 @@ if TORCH_AVAILABLE:
         )
 
 
-class Stage2Model(nn.Module):
+class Stage2Model(nn.Module if TORCH_AVAILABLE else object):
     """
     Модель Stage2 для уточнения координат точек (новая архитектура 2025).
     ResNet34 backbone + регрессионная голова.
@@ -63,7 +65,7 @@ class Stage2Model(nn.Module):
         return self.fc(x)
 
 
-class SubPixelModel(nn.Module):
+class SubPixelModel(nn.Module if TORCH_AVAILABLE else object):
     """
     Модель SubPixel для субпиксельного уточнения координат (новая 2025).
     Custom CNN для патчей 64x64.
@@ -110,6 +112,18 @@ class SubPixelModel(nn.Module):
         return self.regressor(x)
 
 
+def verify_model(path):
+    manifest=json.loads((Path(__file__).parent/'model_manifest.json').read_text())
+    p=Path(path)
+    if hashlib.sha256(p.read_bytes()).hexdigest() != manifest.get(p.name):
+        raise ValueError('Checkpoint is not in the verified release manifest')
+
+
+def load_trusted_checkpoint(path, device):
+    verify_model(path)
+    return torch.load(path, map_location=device, weights_only=False)
+
+
 def load_stage2_model(model_path: str, device):
     """
     Загрузить модель Stage2 из файла.
@@ -132,7 +146,7 @@ def load_stage2_model(model_path: str, device):
 
     try:
         model = Stage2Model()
-        state = torch.load(model_path, map_location=device, weights_only=False)
+        state = load_trusted_checkpoint(model_path, device)
 
         if isinstance(state, dict) and 'model_state_dict' in state:
             model.load_state_dict(state['model_state_dict'])
@@ -167,7 +181,7 @@ def load_subpixel_model(model_path: str, device):
 
     try:
         model = SubPixelModel()
-        state = torch.load(model_path, map_location=device, weights_only=False)
+        state = load_trusted_checkpoint(model_path, device)
 
         if isinstance(state, dict) and 'model_state_dict' in state:
             model.load_state_dict(state['model_state_dict'])
@@ -206,7 +220,7 @@ def get_device():
 # -----------------------------------------------------------------------------
 # ПОРТАБЕЛЬНАЯ Stage2 (нормализованный выход, итеративное уточнение)
 # -----------------------------------------------------------------------------
-class Stage2PortableModel(nn.Module):
+class Stage2PortableModel(nn.Module if TORCH_AVAILABLE else object):
     """
     Stage2 из версии 1.6: выход — нормализованное смещение, умножается на STAGE2_CROP_HALF.
     """
@@ -241,7 +255,7 @@ def load_stage2_portable_model(model_path: str, device):
         return None
     try:
         model = Stage2PortableModel()
-        state = torch.load(model_path, map_location=device, weights_only=False)
+        state = load_trusted_checkpoint(model_path, device)
         if isinstance(state, dict) and 'model_state_dict' in state:
             model.load_state_dict(state['model_state_dict'])
         else:

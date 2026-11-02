@@ -141,7 +141,7 @@ if ($Headline) {
     $publishArgs += @("--headline", $Headline)
 }
 if ($ServerPassword) {
-    $publishArgs += @("--server-password", $ServerPassword)
+    $env:NEUROWINGS_SERVER_PASSWORD = $ServerPassword
 }
 foreach ($line in $Note) {
     if ($line) {

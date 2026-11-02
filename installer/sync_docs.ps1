@@ -56,7 +56,7 @@ $publishArgs = @(
 )
 
 if ($ServerPassword) {
-    $publishArgs += @("--server-password", $ServerPassword)
+    $env:NEUROWINGS_SERVER_PASSWORD = $ServerPassword
 }
 
 & $PythonExe @publishArgs

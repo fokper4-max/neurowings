@@ -88,7 +88,9 @@ class BatchResultsWidget(QWidget):
         for row, (path, img_data) in enumerate(with_wings):
             # Убеждаемся, что есть результаты анализа
             # Если их нет, используем базовый расчет (для обратной совместимости)
-            analysis_results = getattr(img_data, 'analysis_results', None)
+            from .analysis_widget import AnalysisWidget
+            AnalysisWidget.calculate_analysis_results(self, img_data)
+            analysis_results = img_data.analysis_results
             if analysis_results:
                 # Берем данные из сохраненных результатов анализа
                 total = analysis_results.get('total', 0)
@@ -108,9 +110,9 @@ class BatchResultsWidget(QWidget):
                 total = len(wings)
                 identified = sum(1 for w in wings if w.analysis and w.analysis.is_identified)
                 
-                ci_values = [w.analysis.CI for w in wings if w.analysis and w.analysis.CI > 0]
-                dsa_values = [w.analysis.DsA for w in wings if w.analysis]
-                hi_values = [w.analysis.HI for w in wings if w.analysis and w.analysis.HI > 0]
+                ci_values = [w.analysis.CI for w in wings if w.analysis and w.analysis.is_valid and w.analysis.CI > 0]
+                dsa_values = [w.analysis.DsA for w in wings if w.analysis and w.analysis.is_valid]
+                hi_values = [w.analysis.HI for w in wings if w.analysis and w.analysis.is_valid and w.analysis.HI > 0]
                 
                 mean_ci = np.mean(ci_values) if ci_values else 0
                 mean_dsa = np.mean(dsa_values) if dsa_values else 0

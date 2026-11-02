@@ -254,7 +254,7 @@ if (-not $SkipPyInstaller) {
     $distDir = Join-Path $ProjectRoot "dist"
     $exePath = Join-Path $distDir "$ProductName.exe"
     $versionedExePath = Join-Path $distDir "$ProductName-$InstallerVersion.exe"
-    if (Test-Path $builtExePath) {
+    if ($pyInstallerExitCode -eq 0 -and (Test-Path $builtExePath)) {
         if (-not (Test-Path $distDir)) {
             New-Item -ItemType Directory -Path $distDir -Force | Out-Null
         }

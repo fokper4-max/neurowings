@@ -5,6 +5,8 @@ NeuroWings - Главное окно приложения
 """
 
 import html
+import math
+import copy
 import os
 import json
 import sys
@@ -28,6 +30,8 @@ from ..core.update_manager import (
     is_direct_download_url,
     launch_windows_update_script,
 )
+from ..core.image_io import read_pixmap
+from ..core.project_io import save_project, load_project
 from ..core.tps_io import load_tps_into_image, save_tps_from_image
 
 from PyQt5.QtWidgets import (
@@ -36,10 +40,10 @@ from PyQt5.QtWidgets import (
     QPushButton, QToolButton, QLabel, QCheckBox, QGroupBox,
     QSplitter, QToolBar, QFileDialog, QMessageBox, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
-    QShortcut, QRadioButton, QButtonGroup, QAction, QTabWidget, QGridLayout,
+    QScrollArea, QShortcut, QRadioButton, QButtonGroup, QAction, QTabWidget, QGridLayout,
     QApplication, QMenu, QSizePolicy, QDialog, QDialogButtonBox, QProgressDialog
 )
-from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QUrl
+from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QUrl, QThread
 from PyQt5.QtGui import QPixmap, QColor, QKeySequence, QPen, QDesktopServices
 
 from .graphics_items import PointItem, WingLabelItem, BBoxItem, MeasurementLineItem
@@ -67,6 +71,7 @@ class MainWindow(QMainWindow):
         
         # Данные
         self.images: Dict[str, ImageData] = {}
+        self._undo_stack = []
         self.current_image: Optional[ImageData] = None
         self.current_folder: Optional[Path] = None
         
@@ -360,7 +365,7 @@ class MainWindow(QMainWindow):
             group.addButton(rb_stage2)
             sel_layout.addWidget(rb_stage2, idx + 1, 3)
             
-            rb_stage2.setChecked(True)  # По умолчанию выбран итеративный Stage2
+            rb_yolo.setChecked(True)  # Validated pose baseline; refiners remain opt-in
             group.buttonClicked.connect(self._on_point_model_changed)
             self.point_model_groups.append(group)
         
@@ -403,7 +408,13 @@ class MainWindow(QMainWindow):
 
         right_layout.addStretch()
 
-        self.right_panel.setMaximumWidth(250)
+        right_content = self.right_panel
+        right_scroll = QScrollArea()
+        right_scroll.setWidgetResizable(True)
+        right_scroll.setWidget(right_content)
+        right_scroll.setMinimumWidth(280)
+        right_scroll.setMaximumWidth(360)
+        self.right_panel = right_scroll
         self.main_splitter.addWidget(self.right_panel)
 
         self.main_splitter.setSizes([180, 950, 250])
@@ -438,6 +449,7 @@ class MainWindow(QMainWindow):
         file_menu.addAction("Выход", self.close)
         
         edit_menu = menubar.addMenu("Правка")
+        edit_menu.addAction("Отменить изменение", self._undo_edit, "Ctrl+Z")
         edit_menu.addAction("Удалить крыло", self._delete_selected_wing, "Delete")
         
         view_menu = menubar.addMenu("Вид")
@@ -716,6 +728,8 @@ class MainWindow(QMainWindow):
                     path = search_dir / name
                     if path.exists():
                         print(f"Загрузка модели детекции: {path}")
+                        from ..core.models import verify_model
+                        verify_model(path)
                         self.model_det = YOLO(str(path))
                         break
                 if self.model_det:
@@ -730,6 +744,8 @@ class MainWindow(QMainWindow):
                     path = search_dir / name
                     if path.exists():
                         print(f"Загрузка модели позы: {path}")
+                        from ..core.models import verify_model
+                        verify_model(path)
                         self.model_pose = YOLO(str(path))
                         break
                 if self.model_pose:
@@ -738,36 +754,7 @@ class MainWindow(QMainWindow):
             if not self.model_pose:
                 print(f"ОШИБКА: Модель позы не найдена! Искали в: {search_dirs}")
             
-            # Поиск модели Stage2
-            for name in ["stage2_best.pth", "stage2.pth"]:
-                for search_dir in search_dirs:
-                    path = search_dir / name
-                    if path.exists():
-                        self.model_stage2 = load_stage2_model(str(path), self.device)
-                        break
-                if self.model_stage2:
-                    break
-
-            # Поиск портативной Stage2 (нормализованный выход, старая логика)
-            for name in ["stage2_portable.pth", "stage2_portable_best.pth", "stage2_old.pth"]:
-                for search_dir in search_dirs:
-                    path = search_dir / name
-                    if path.exists():
-                        self.model_stage2_portable = load_stage2_portable_model(str(path), self.device)
-                        break
-                if self.model_stage2_portable:
-                    break
-
-            # Поиск модели SubPixel
-            for name in ["subpixel_best.pth", "subpixel.pth"]:
-                for search_dir in search_dirs:
-                    path = search_dir / name
-                    if path.exists():
-                        self.model_subpixel = load_subpixel_model(str(path), self.device)
-                        break
-                if self.model_subpixel:
-                    break
-
+            # Legacy refinement weights are retained, but are not loaded or applied.
             status = []
             if self.model_det:
                 status.append("Det✓")
@@ -779,6 +766,7 @@ class MainWindow(QMainWindow):
                 status.append("Stage2-old✓")
             if self.model_subpixel:
                 status.append("SubPixel✓")
+            status.append("Уточнение отключено: используется YOLO pose")
             if not TORCHVISION_MODELS_AVAILABLE:
                 status.append(
                     f"Stage2 disabled ({TORCHVISION_MODELS_IMPORT_ERROR or 'torchvision.models import failed'})"
@@ -812,6 +800,12 @@ class MainWindow(QMainWindow):
         if not self.current_folder:
             return
         
+        if not self._confirm_close():
+            return
+        self._cancel_adding()
+        self.current_image = None
+        self.scene.clear()
+        self._undo_stack.clear()
         self.images.clear()
         self.file_list.clear()
         
@@ -847,9 +841,11 @@ class MainWindow(QMainWindow):
         """Загрузить TPS файл (через tps_io)"""
         try:
             load_tps_into_image(img_data, tps_path)
+            restored_project = load_project(img_data, tps_path)
             # Точки из TPS считаем ground truth
-            for wing in img_data.wings:
-                wing.point_sources = ['gt'] * NUM_POINTS
+            if not restored_project:
+                for wing in img_data.wings:
+                    wing.point_sources = ['gt'] * NUM_POINTS
             img_data.is_processed = True
             img_data.analyze_all_wings()
         except Exception as e:
@@ -871,10 +867,12 @@ class MainWindow(QMainWindow):
         
         self.current_image = self.images[path]
         
-        pixmap = QPixmap(path)
+        pixmap = read_pixmap(path)
         self.current_image.width = pixmap.width()
         self.current_image.height = pixmap.height()
         
+        self._cancel_adding()
+        self.selected_wing_idx = -1
         self.scene.clear()
         self.point_items.clear()
         self.wing_labels.clear()
@@ -959,6 +957,9 @@ class MainWindow(QMainWindow):
 
         for wing in self.current_image.wings:
             if point_idx < len(wing.point_sources):
+                if model_type in ("yolo", "stage1", "stage2") and len(getattr(wing, "points_" + model_type)) != NUM_POINTS:
+                    self.statusBar().showMessage("У выбранной модели нет результата; сохранён текущий источник")
+                    continue
                 wing.point_sources[point_idx] = model_type
 
         self.current_image.is_modified = True
@@ -992,6 +993,9 @@ class MainWindow(QMainWindow):
             for wing in img_data.wings:
                 for idx, model_type in enumerate(selection):
                     if idx < len(wing.point_sources):
+                        if model_type in ("yolo", "stage1", "stage2") and len(getattr(wing, "points_" + model_type)) != NUM_POINTS:
+                            self.statusBar().showMessage("У выбранной модели нет результата; сохранён текущий источник")
+                            continue
                         wing.point_sources[idx] = model_type
             img_data.is_modified = True
             img_data.analyze_all_wings()
@@ -1021,9 +1025,11 @@ class MainWindow(QMainWindow):
             # Обновляем источники для всех точек
             for point_idx in range(NUM_POINTS):
                 if point_idx < len(wing.point_sources):
+                    if model_type in ("yolo", "stage1", "stage2") and len(getattr(wing, "points_" + model_type)) != NUM_POINTS:
+                        self.statusBar().showMessage("У выбранной модели нет результата; сохранён текущий источник")
+                        continue
                     wing.point_sources[point_idx] = model_type
             # Обновляем активную модель крыла
-            wing.active_model = model_type
 
         # Обновляем радиокнопки в UI
         for point_idx, group in enumerate(self.point_model_groups):
@@ -1060,7 +1066,6 @@ class MainWindow(QMainWindow):
             self.scene.removeItem(line)
         self.measurement_lines.clear()
         
-        self._sort_wings_internal()
         for wing_idx, wing in enumerate(self.current_image.wings):
             cx, cy = wing.get_center()
             
@@ -1088,7 +1093,7 @@ class MainWindow(QMainWindow):
             if active_points:
                 for point_idx in range(min(8, len(active_points))):
                     px, py = active_points[point_idx]
-                    if px == 0 and py == 0:
+                    if not math.isfinite(px) or not math.isfinite(py) or (px == 0 and py == 0):
                         continue  # Пропускаем неинициализированные точки
                     is_problem = point_idx in problem_points
 
@@ -1291,7 +1296,9 @@ class MainWindow(QMainWindow):
                 self.wings_table.setItem(i, 2, QTableWidgetItem(f"{wing.analysis.CI:.2f}"))
 
                 status = "✅" if wing.analysis.is_identified else "❌"
-                self.wings_table.setItem(i, 3, QTableWidgetItem(status))
+                status_item = QTableWidgetItem(status)
+                status_item.setToolTip(wing.analysis.invalid_reason)
+                self.wings_table.setItem(i, 3, status_item)
             else:
                 # Если анализ отсутствует, заполняем пустыми значениями
                 self.wings_table.setItem(i, 1, QTableWidgetItem("—"))
@@ -1314,12 +1321,13 @@ class MainWindow(QMainWindow):
 
         if row < len(self.current_image.wings):
             for pt_item in self.point_items:
-                if pt_item.wing_idx == row and pt_item.source_type == 'active':
+                if pt_item.wing_idx == row and pt_item.global_idx >= 0:
                     pt_item.set_selected(True)
 
             cx, cy = self.current_image.wings[row].get_center()
 
             # Автоматически увеличиваем масштаб до ~1.6x (эквивалент двух нажатий "-" от 2x) и центрируем на крыле
+            self.view._fit_mode = False
             self.view.resetTransform()
             self.view.scale(1.6, 1.6)
             self.view._zoom = 1.6
@@ -1337,10 +1345,11 @@ class MainWindow(QMainWindow):
             pt_item.set_selected(False)
         
         for pt_item in self.point_items:
-            if pt_item.wing_idx == wing_idx and pt_item.source_type == 'active':
+            if pt_item.wing_idx == wing_idx and pt_item.global_idx >= 0:
                 pt_item.set_selected(True)
 
         cx, cy = self.current_image.wings[wing_idx].get_center()
+        self.view._fit_mode = False
         self.view.resetTransform()
         self.view.scale(1.6, 1.6)
         self.view._zoom = 1.6
@@ -1368,11 +1377,32 @@ class MainWindow(QMainWindow):
         for item in self.point_items:
             item.set_selected(False)
         
-        if 0 <= global_idx < len(self.point_items):
-            self.point_items[global_idx].set_selected(True)
+        for point in self.point_items:
+            if point.global_idx == global_idx and global_idx >= 0:
+                point.set_selected(True)
         
         self.wings_table.selectRow(wing_idx)
     
+    def _remember_edit(self):
+        if self.current_image:
+            self._undo_stack.append((str(self.current_image.path), copy.deepcopy(self.current_image.wings)))
+            self._undo_stack = self._undo_stack[-50:]
+
+    def _undo_edit(self):
+        if not self._undo_stack:
+            return
+        path, wings = self._undo_stack.pop()
+        if path in self.images:
+            image = self.images[path]
+            image.wings = wings
+            image.is_modified = True
+            image.analyze_all_wings()
+            if image is self.current_image:
+                self._update_display()
+                self._update_analysis_widget()
+                self._update_interpretation_widgets()
+            self.batch_widget.update_batch_results(self.images)
+
     def _on_point_moved(self, wing_idx: int, point_idx: int, x: float, y: float):
         """Перемещение точки"""
         if not self.current_image:
@@ -1381,6 +1411,7 @@ class MainWindow(QMainWindow):
         if 0 <= wing_idx < len(self.current_image.wings):
             wing = self.current_image.wings[wing_idx]
             if 0 <= point_idx < len(wing.points):
+                self._remember_edit()
                 wing.points[point_idx].x = x
                 wing.points[point_idx].y = y
                 wing.points[point_idx].is_manual = True
@@ -1442,12 +1473,12 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.Yes:
                 # Удаляем точку из активной модели
-                active_model = wing.active_model
+                active_model = wing.point_sources[point_idx] if point_idx < len(wing.point_sources) else 'manual'
                 points_dict = {
                     'yolo': wing.points_yolo,
                     'stage1': wing.points_stage1,
                     'stage2': wing.points_stage2,
-                    'gt': wing.points
+                    'gt': wing.points, 'manual': wing.points
                 }
 
                 if active_model in points_dict and points_dict[active_model]:
@@ -1455,10 +1486,11 @@ class MainWindow(QMainWindow):
                     if 0 <= point_idx < len(points):
                         # Удаляем точку (заменяем на None или удаляем объект)
                         # В WingPoint можно установить координаты в 0 или удалить из списка
-                        points[point_idx].x = 0
-                        points[point_idx].y = 0
+                        self._remember_edit()
+                        points[point_idx].x = float("nan")
+                        points[point_idx].y = float("nan")
                         self.current_image.is_modified = True
-                        wing.analyze()  # Пересчитываем только это крыло
+                        wing.analyze(image_height=self.current_image.height)
                         self._update_display()
                         self._update_analysis_widget()
                         self._update_interpretation_widgets()
@@ -1469,6 +1501,7 @@ class MainWindow(QMainWindow):
                 QMessageBox.Yes | QMessageBox.No
             )
             if reply == QMessageBox.Yes:
+                self._remember_edit()
                 del self.current_image.wings[wing_idx]
                 self.current_image.is_modified = True
                 self.current_image.analyze_all_wings()  # Пересчитываем все крылья
@@ -1546,6 +1579,12 @@ class MainWindow(QMainWindow):
     
     def _process_images(self, paths):
         """Обработать изображения"""
+        if getattr(self, 'worker', None) and self.worker.isRunning():
+            self.statusBar().showMessage('Обработка уже выполняется')
+            return
+        if any(self.images[str(p)].wings for p in paths if str(p) in self.images):
+            if QMessageBox.question(self, 'Повторная обработка', 'Заменить имеющиеся точки новым распознаванием?', QMessageBox.Yes | QMessageBox.No) != QMessageBox.Yes:
+                return
         if not self.model_det or not self.model_pose:
             QMessageBox.critical(self, "Ошибка", "Модели не загружены!")
             return
@@ -1569,7 +1608,7 @@ class MainWindow(QMainWindow):
         self.progress_bar.setMaximum(total)
         self.progress_bar.setValue(current)
         self.statusBar().showMessage(message)
-        QApplication.processEvents()
+        # Event loop remains owned by Qt
     
     def _on_finished(self, results):
         """Завершение обработки"""
@@ -1578,12 +1617,14 @@ class MainWindow(QMainWindow):
         for path_str, wings in results.items():
             if path_str in self.images:
                 img_data = self.images[path_str]
-                img_data.wings = wings
+                img_data.wings = sorted(wings, key=lambda w: (round(w.get_center()[1]/400), w.get_center()[0]))
+                img_data.is_modified = True
+                img_data.analysis_results = {}
                 img_data.is_processed = True
                 
                 # Убедимся, что размеры изображения установлены для правильных расчетов
                 if img_data.height == 0:
-                    pixmap = QPixmap(str(img_data.path))
+                    pixmap = read_pixmap(img_data.path)
                     img_data.width = pixmap.width()
                     img_data.height = pixmap.height()
                 
@@ -1594,7 +1635,7 @@ class MainWindow(QMainWindow):
             path = item.data(Qt.UserRole)
             if path in self.images and self.images[path].wings:
                 text = item.text()
-                if text.startswith("â—‹"):
+                if text.startswith("○"):
                     item.setText("✓" + text[1:])
         
         self._update_files_stats()
@@ -1665,12 +1706,20 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         self._gpt_api_key = cfg.get("api_key", "")
+        if not self._gpt_api_key:
+            try:
+                from ..core.credential_store import read_key
+                self._gpt_api_key = read_key()
+            except Exception:
+                self._gpt_api_key = ""
         self._gpt_model = cfg.get("model", "gpt-4o-mini")
         self._gpt_enabled = bool(cfg.get("enabled", False) and self._gpt_api_key)
         self._init_gpt_client()
 
     def _save_gpt_config(self):
-        cfg = {"api_key": self._gpt_api_key, "model": self._gpt_model, "enabled": self._gpt_enabled}
+        from ..core.credential_store import write_key
+        write_key(self._gpt_api_key)
+        cfg = {"model": self._gpt_model, "enabled": self._gpt_enabled}
         try:
             self._gpt_config_path.write_text(json.dumps(cfg, ensure_ascii=False, indent=2))
         except Exception as e:
@@ -1744,7 +1793,12 @@ class MainWindow(QMainWindow):
             self._gpt_api_key = key_edit.text().strip()
             self._gpt_model = model_edit.text().strip() or "gpt-4o-mini"
             self._gpt_enabled = enabled_chk.isChecked() and bool(self._gpt_api_key)
-            self._save_gpt_config()
+            try:
+                self._save_gpt_config()
+            except Exception as exc:
+                QMessageBox.warning(self, "GPT", f"Не удалось сохранить ключ в системном хранилище: {exc}")
+                self._gpt_enabled = False
+                return
             self._init_gpt_client()
             self._apply_gpt_to_widgets()
 
@@ -1812,18 +1866,16 @@ class MainWindow(QMainWindow):
         """Сохранить все TPS"""
         saved = 0
         for img_data in self.images.values():
-            if img_data.wings:
+            if img_data.wings or img_data.is_modified:
                 self._save_tps(img_data)
                 saved += 1
         self.statusBar().showMessage(f"Сохранено: {saved}")
     
     def _save_tps(self, img_data):
         """Сохранить TPS файл в формате WingsDig"""
-        if not img_data.wings:
-            return
-        
         tps_path = img_data.path.with_suffix('.tps')
         save_tps_from_image(img_data, tps_path)
+        save_project(img_data, tps_path)
         img_data.is_modified = False
     
     def _export_excel(self):
@@ -1838,11 +1890,13 @@ class MainWindow(QMainWindow):
     
     def _zoom(self, factor):
         """Масштабирование"""
+        self.view._fit_mode = False
         self.view.scale(factor, factor)
-        self.view._zoom *= factor
+        self.view._zoom = self.view.transform().m11()
     
     def _zoom_100(self):
         """Масштаб 1:1"""
+        self.view._fit_mode = False
         self.view.resetTransform()
         self.view._zoom = 1.0
 
@@ -2131,6 +2185,10 @@ class MainWindow(QMainWindow):
     def closeEvent(self, event):
         """Закрытие окна"""
         if self._skip_unsaved_prompt or self._confirm_close():
+            for worker in (getattr(self, 'worker', None), self._update_check_worker, self._update_download_worker, *self.findChildren(QThread)):
+                if worker and worker.isRunning():
+                    if hasattr(worker, 'stop'): worker.stop()
+                    worker.wait()
             event.accept()
             return
         event.ignore()

@@ -73,12 +73,12 @@ $downloads = @{
         Description = "Python 3.11.8 (64-bit)"
     }
     "python-3.10-amd64.exe" = @{
-        Url = "https://www.python.org/ftp/python/3.10.13/python-3.10.13-amd64.exe"
-        Description = "Python 3.10.13 (64-bit)"
+        Url = "https://www.python.org/ftp/python/3.10.11/python-3.10.11-amd64.exe"
+        Description = "Python 3.10.11 (64-bit)"
     }
     "python-3.8-amd64.exe" = @{
-        Url = "https://www.python.org/ftp/python/3.8.18/python-3.8.18-amd64.exe"
-        Description = "Python 3.8.18 (64-bit)"
+        Url = "https://www.python.org/ftp/python/3.8.10/python-3.8.10-amd64.exe"
+        Description = "Python 3.8.10 (64-bit)"
     }
 }
 

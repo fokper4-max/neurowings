@@ -12,5 +12,5 @@ Total size: ~190 MB
 Without these models the application will start but neural network
 processing will not be available. You can still open and edit TPS files.
 
-Models are not included in the portable distribution to reduce download size.
-Contact the author or download from the project releases page.
+The release build embeds these verified models in the portable EXE.
+Source-only checkouts need the external verified models directory to build or recognize.

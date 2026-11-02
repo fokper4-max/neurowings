@@ -4,6 +4,7 @@
 NeuroWings - Модели данных
 """
 
+import math
 from dataclasses import dataclass, field
 from typing import List, Optional, Tuple, Dict
 from pathlib import Path
@@ -15,6 +16,8 @@ from .calculations import calculate_indices, identify_breed, get_problem_points,
 @dataclass
 class WingAnalysis:
     """Результаты анализа крыла"""
+    is_valid: bool = False
+    invalid_reason: str = ""
     CI: float = 0
     DsA: float = 0
     HI: float = 0
@@ -56,10 +59,11 @@ class Wing:
     
     def get_center(self) -> Tuple[float, float]:
         """Получить центр крыла"""
-        if not self.points:
+        points = [(x,y) for x,y in self.get_active_points() if math.isfinite(x) and math.isfinite(y)]
+        if not points:
             return (0, 0)
-        cx = sum(p.x for p in self.points) / len(self.points)
-        cy = sum(p.y for p in self.points) / len(self.points)
+        cx = sum(p[0] for p in points) / len(points)
+        cy = sum(p[1] for p in points) / len(points)
         return (cx, cy)
     
     def get_points_tuple(self) -> List[Tuple[float, float]]:
@@ -70,7 +74,7 @@ class Wing:
         """Получить координаты точек согласно выбранным источникам"""
         result = []
         for i in range(min(8, len(self.points))):
-            source = self.point_sources[i] if i < len(self.point_sources) else 'stage2'
+            source = self.point_sources[i] if i < len(self.point_sources) else 'manual'
             if source == 'yolo' and i < len(self.points_yolo):
                 result.append((self.points_yolo[i].x, self.points_yolo[i].y))
             elif source == 'stage1' and i < len(self.points_stage1):
@@ -83,7 +87,7 @@ class Wing:
                 result.append((0, 0))
         return result
     
-    def analyze(self, image_height: Optional[int] = None):
+    def analyze(self, image_height: Optional[int] = None, image_width: Optional[int] = None):
         """
         Выполнить анализ крыла
         
@@ -92,8 +96,17 @@ class Wing:
                          в систему WingsDig (Y снизу). Если None, используются координаты как есть.
         """
         points = self.get_active_points()
-        if len(points) != 8:
-            self.analysis = WingAnalysis()
+        reason = ""
+        if len(points) != 8 or not all(math.isfinite(x) and math.isfinite(y) for x,y in points):
+            reason = "Требуется разметка восьми конечных координат"
+        elif any(x < 0 or y < 0 or (image_width and x >= image_width) or (image_height and y >= image_height) for x,y in points):
+            reason = "Точка вне изображения"
+        elif any(math.hypot(x-u,y-v) < 1e-6 for i,(x,y) in enumerate(points) for u,v in points[i+1:]):
+            reason = "Совпавшие точки"
+        elif max(abs((x-points[0][0])*(v-points[0][1])-(y-points[0][1])*(u-points[0][0])) for x,y in points[1:] for u,v in points[1:]) < 1e-6:
+            reason = "Вырожденная геометрия"
+        if reason:
+            self.analysis = WingAnalysis(invalid_reason=reason, problem_points=list(range(8)))
             return
         
         # Преобразование координат из экранной системы в WingsDig формат для правильных расчетов
@@ -109,6 +122,7 @@ class Wing:
         _, projection = calculate_dsa_excel(points)
         
         self.analysis = WingAnalysis(
+            is_valid=True,
             CI=indices['CI'],
             DsA=indices['DsA'],
             HI=indices['HI'],
@@ -133,8 +147,9 @@ class ImageData:
     
     def analyze_all_wings(self):
         """Анализировать все крылья"""
+        self.analysis_results = {}
         for wing in self.wings:
-            wing.analyze(image_height=self.height if self.height > 0 else None)
+            wing.analyze(image_height=self.height if self.height > 0 else None, image_width=self.width if self.width > 0 else None)
 
 
 class EditMode(Enum):

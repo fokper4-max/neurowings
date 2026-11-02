@@ -2,13 +2,15 @@
 ; Упрощенная версия для быстрого создания установщика
 
 !define PRODUCT_NAME "НейроКрылья"
-!define PRODUCT_VERSION "2.0.4"
+!define PRODUCT_VERSION "2.1.0"
 !define PRODUCT_PUBLISHER "Команда НейроКрылья"
 !define PRODUCT_WEB_SITE "https://github.com/yourusername/neurowings"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
 
 !include "MUI2.nsh"
+!include "LogicLib.nsh"
+!include "x64.nsh"
 
 Name "${PRODUCT_NAME} ${PRODUCT_VERSION}"
 OutFile "..\dist\${PRODUCT_NAME}-${PRODUCT_VERSION}-Setup.exe"

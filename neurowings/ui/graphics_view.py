@@ -42,7 +42,8 @@ class ZoomableGraphicsView(QGraphicsView):
         self._add_scroll_buttons()
         self._position_scroll_buttons()
         
-        self._zoom = 1.0
+        self._fit_mode = True
+        self._zoom = self.transform().m11()
         self._dragging_point = None
         self._drag_start_pos = None
         self.edit_mode = EditMode.VIEW
@@ -56,7 +57,7 @@ class ZoomableGraphicsView(QGraphicsView):
         
         menu = QMenu(self)
         
-        if isinstance(item, PointItem):
+        if isinstance(item, PointItem) and item.global_idx >= 0:
             act_delete = menu.addAction("🗑 Удалить точку")
             act_delete.triggered.connect(
                 lambda: self.point_delete_requested.emit(item.wing_idx, item.point_idx)
@@ -120,7 +121,10 @@ class ZoomableGraphicsView(QGraphicsView):
 
     def resizeEvent(self, event):
         super().resizeEvent(event)
-        self._position_scroll_buttons()
+        if hasattr(self, "btn_up"):
+            self._position_scroll_buttons()
+        if getattr(self, "_fit_mode", False):
+            self.fit_in_view()
 
     def _position_scroll_buttons(self):
         """Расположить стрелки у краёв виджета рядом со скроллами"""
@@ -149,6 +153,7 @@ class ZoomableGraphicsView(QGraphicsView):
     
     def wheelEvent(self, event):
         """Масштабирование колесом мыши"""
+        self._fit_mode = False
         factor = 1.25
         if event.angleDelta().y() > 0:
             if self._zoom < 50:
@@ -179,7 +184,7 @@ class ZoomableGraphicsView(QGraphicsView):
             item = self.itemAt(event.pos())
             scene_pos = self.mapToScene(event.pos())
 
-            if isinstance(item, PointItem):
+            if isinstance(item, PointItem) and item.global_idx >= 0:
                 # Всегда посылаем сигнал о клике на точку (для выделения в списке)
                 self.point_clicked.emit(item.global_idx, item.wing_idx, item.point_idx)
 
@@ -248,5 +253,6 @@ class ZoomableGraphicsView(QGraphicsView):
     
     def fit_in_view(self):
         """Подогнать вид под содержимое"""
+        self._fit_mode = True
         self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
-        self._zoom = 1.0
+        self._zoom = self.transform().m11()

@@ -11,3 +11,8 @@ certifi>=2024.0.0
 
 # For building
 pyinstaller>=6.0.0
+
+Pillow>=10.0
+openpyxl>=3.1
+matplotlib>=3.8
+keyring>=25.0

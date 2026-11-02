@@ -64,6 +64,10 @@ hiddenimports = [
     'ultralytics',
     'openai',
     'psutil',
+    'openpyxl',
+    'keyring',
+    'keyring.backends.Windows',
+    'matplotlib.backends.backend_agg',
     # PyTorch зависимости
     'torch.nn',
     'torch.nn.functional',
@@ -116,7 +120,6 @@ a = Analysis(
     excludes=[
         'PIL.AvifImagePlugin',
         'PIL._avif',
-        'matplotlib',
         'scipy',
         'pandas',
         # Keep packaging aligned with the onefile build. NeuroWings does not
@@ -127,12 +130,11 @@ a = Analysis(
     ],
     win_no_prefer_redirects=False,
     win_private_assemblies=False,
-    cipher=None,
     noarchive=False,
 )
 
 # Удаление дубликатов
-pyz = PYZ(a.pure, a.zipped_data, cipher=None)
+pyz = PYZ(a.pure)
 
 # Создание папки с файлами (ONEDIR)
 exe = EXE(
@@ -158,7 +160,6 @@ exe = EXE(
 coll = COLLECT(
     exe,
     a.binaries,
-    a.zipfiles,
     a.datas,
     strip=False,
     upx=False,

@@ -1,104 +1,54 @@
-#!/usr/bin/env python3
-# -*- coding: utf-8 -*-
-"""
-TPS I/O helpers.
-Выделено из main_window для изоляции логики чтения/записи TPS.
-Сохраняет формат WingsDig: запятая как разделитель, округление до целых с .00000, CRLF, кодировка CP1251.
-"""
-
+"""Validated TPS import and atomic WingsDig-compatible export."""
 from pathlib import Path
-from typing import List
-
-from .constants import NUM_POINTS
+import math, os, tempfile
 from .data_models import Wing, WingPoint
+from .image_io import image_size
 
-
-def load_tps_into_image(img_data, tps_path: Path) -> None:
-    """
-    Заполнить ImageData крыльями из TPS.
-    Преобразует Y из TPS (счёт снизу) в экранные координаты (счёт сверху).
-    """
-    if not tps_path.exists():
-        return
-
-    # Обеспечиваем размеры изображения (для инверсии Y)
-    # Используем QImageReader.size() - читает только заголовок файла, не загружая всё изображение
-    if img_data.height == 0:
-        try:
-            from PyQt5.QtGui import QImageReader
-            reader = QImageReader(str(img_data.path))
-            size = reader.size()
-            if size.isValid():
-                img_data.width = size.width()
-                img_data.height = size.height()
-            else:
-                return
-        except Exception:
-            return
-
-    # WingsDig использует Windows-1251, но наши файлы могут быть в UTF-8
-    # Пробуем сначала cp1251, потом utf-8
-    for encoding in ['cp1251', 'utf-8']:
-        try:
-            with open(tps_path, 'r', encoding=encoding) as f:
-                lines = [l.strip() for l in f.readlines()]
-            break
-        except UnicodeDecodeError:
-            continue
-    else:
-        # Fallback с игнорированием ошибок
-        with open(tps_path, 'r', encoding='utf-8', errors='ignore') as f:
-            lines = [l.strip() for l in f.readlines()]
-
-    points = []
-    i = 0
+def load_tps_into_image(img_data, tps_path):
+    path = Path(tps_path)
+    if not path.exists(): return
+    width, height = (img_data.width, img_data.height) if img_data.height else image_size(img_data.path)
+    raw = path.read_bytes()
+    try: text = raw.decode('utf-8-sig')
+    except UnicodeDecodeError: text = raw.decode('cp1251')
+    lines = [x.strip() for x in text.splitlines() if x.strip()]
+    wings=[]; i=0
     while i < len(lines):
-        if lines[i].upper().startswith('LM='):
-            npoints = int(lines[i].split('=')[1])
-            for j in range(1, npoints + 1):
-                if i + j < len(lines):
-                    coords = lines[i + j].replace(',', '.').split()
-                    if len(coords) == 2:
-                        try:
-                            x, y_tps = float(coords[0]), float(coords[1])
-                            # TPS/WingsDig: Y снизу; экран: сверху
-                            y = img_data.height - y_tps
-                            points.append((x, y))
-                        except ValueError:
-                            pass
-            i += npoints
-        i += 1
+        if not lines[i].upper().startswith('LM='):
+            i+=1; continue
+        count=int(lines[i].split('=',1)[1]); i+=1
+        if count < 0 or count % 8 or count > 100000: raise ValueError('TPS: LM должен быть неотрицательным кратным 8')
+        points=[]
+        for _ in range(count):
+            if i >= len(lines): raise ValueError('TPS: недостаточно координат')
+            fields=lines[i].replace(',','.').split(); i+=1
+            if len(fields)!=2: raise ValueError('TPS: повреждённая строка координат')
+            x,y=map(float,fields)
+            if not math.isfinite(x) or not math.isfinite(y): raise ValueError('TPS: недопустимые координаты')
+            points.append(WingPoint(x,height-y))
+        while i<len(lines) and not lines[i].upper().startswith('LM='):
+            if lines[i].upper().startswith('IMAGE=') and Path(lines[i].split('=',1)[1].replace('\\','/')).name.casefold()!=img_data.path.name.casefold():
+                raise ValueError('TPS относится к другому изображению')
+            i+=1
+        wings.extend(Wing(points=points[j:j+8],point_sources=['gt']*8) for j in range(0,count,8))
+    img_data.width=width; img_data.height=height; img_data.wings=wings
 
-    # Формируем крылья
-    img_data.wings = []
-    for idx in range(0, len(points), NUM_POINTS):
-        wing_pts = points[idx:idx + NUM_POINTS]
-        if len(wing_pts) == NUM_POINTS:
-            img_data.wings.append(Wing(points=[WingPoint(x=p[0], y=p[1]) for p in wing_pts]))
-
-
-def save_tps_from_image(img_data, tps_path: Path) -> None:
-    """
-    Сохранить ImageData в TPS (WingsDig совместимый формат).
-    """
-    if not img_data.wings:
-        return
-
-    lines: List[str] = [f"LM={len(img_data.wings) * NUM_POINTS}"]
-
+def save_tps_from_image(img_data, tps_path):
+    path=Path(tps_path)
+    lines=[f'LM={len(img_data.wings)*8}']
     for wing in img_data.wings:
-        pts = wing.get_active_points()
-        for px, py in pts:
-            y_tps = img_data.height - py  # TPS/WingsDig: Y снизу
-            px_rounded = round(px)
-            y_tps_rounded = round(y_tps)
-            coord_str = f"{px_rounded:.5f} {y_tps_rounded:.5f}".replace('.', ',')
-            lines.append(coord_str)
-
-    lines.append(f"IMAGE={img_data.path.name}")
-    lines.append("ID=1")
-
-    # WingsDig использует Windows-1251 кодировку
-    with open(tps_path, 'w', newline='', encoding='cp1251') as f:
-        f.write('\r\n'.join(lines))
-        f.write('\r\n')
+        points=wing.get_active_points()
+        if len(points)!=8: raise ValueError('TPS: требуется 8 точек на крыло')
+        for x,y in points:
+            if not math.isfinite(x) or not math.isfinite(y): raise ValueError('TPS: недопустимые координаты')
+            lines.append(f'{x:.5f} {img_data.height-y:.5f}'.replace('.',','))
+    lines.extend([f'IMAGE={img_data.path.name}','ID=1'])
+    text='\r\n'.join(lines)+'\r\n'
+    try: payload=text.encode('cp1251')
+    except UnicodeEncodeError: payload=text.encode('utf-8')
+    fd,temp=tempfile.mkstemp(prefix=path.name+'.',suffix='.tmp',dir=path.parent)
+    try:
+        with os.fdopen(fd,'wb') as handle: handle.write(payload); handle.flush(); os.fsync(handle.fileno())
+        os.replace(temp,path)
+    finally:
+        if os.path.exists(temp): os.unlink(temp)

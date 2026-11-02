@@ -98,7 +98,10 @@ function Get-PlainTextFromEncryptedFile {
     if (-not (Test-Path $Path)) {
         throw "Файл с зашифрованным паролем не найден: $Path"
     }
-    return (Get-Content $Path -Raw -Encoding UTF8).Trim()
+    $secure = ConvertTo-SecureString ((Get-Content $Path -Raw -Encoding UTF8).Trim())
+    $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($secure)
+    try { return [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr) }
+    finally { [Runtime.InteropServices.Marshal]::ZeroFreeBSTR($bstr) }
 }
 
 function Get-AppVersion {
@@ -330,6 +333,7 @@ function Run-Agent {
 
     $appVersion = Get-AppVersion -RepositoryPath $config.RepositoryPath
     $serverPassword = Get-PlainTextFromEncryptedFile -Path $config.PublishPasswordFile
+    $env:NEUROWINGS_SERVER_PASSWORD = $serverPassword
     if ($state.last_built_version -eq $appVersion) {
         $docsScript = Join-Path $config.RepositoryPath "installer\sync_docs.ps1"
         $docsArgs = @(
@@ -340,7 +344,6 @@ function Run-Agent {
             "-ServerHost", $config.PublishServerHost,
             "-ServerPort", "$($config.PublishServerPort)",
             "-ServerUser", $config.PublishServerUser,
-            "-ServerPassword", $serverPassword,
             "-RemoteDir", $config.PublishRemoteDir,
             "-PublicBaseUrl", $config.PublishBaseUrl
         )
@@ -415,7 +418,6 @@ function Run-Agent {
         "-ServerHost", $config.PublishServerHost,
         "-ServerPort", "$($config.PublishServerPort)",
         "-ServerUser", $config.PublishServerUser,
-        "-ServerPassword", $serverPassword,
         "-RemoteDir", $config.PublishRemoteDir,
         "-PublicBaseUrl", $config.PublishBaseUrl
     )

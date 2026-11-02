@@ -234,9 +234,9 @@ function Save-EncryptedSecret {
     if (-not (Test-Path $dir)) {
         New-Item -ItemType Directory -Path $dir -Force | Out-Null
     }
-    $plain = Convert-SecureToPlain -SecureString $SecureString
-    Set-Content -Path $Path -Value $plain -Encoding UTF8
-    & icacls.exe $Path /inheritance:r /grant:r "Administrators:F" "SYSTEM:F" | Out-Null
+    $encrypted = ConvertFrom-SecureString -SecureString $SecureString
+    Set-Content -Path $Path -Value $encrypted -Encoding UTF8
+    & icacls.exe $Path /inheritance:r /grant:r "*S-1-5-32-544:F" "*S-1-5-18:F" | Out-Null
 }
 
 function Test-HasRequiredModels {
@@ -396,7 +396,7 @@ else {
 }
 
 $agentPath = Join-Path $RepositoryPath "installer\run_release_agent.ps1"
-$taskCommand = "powershell.exe -NoProfile -ExecutionPolicy Bypass -File `"$agentPath`""
+$taskCommand = "powershell.exe -NoProfile -File `"$agentPath`" -ConfigPath `"$configPath`""
 
 & cmd.exe /c "schtasks /Query /TN `"$TaskName`" >nul 2>&1"
 if ($LASTEXITCODE -eq 0) {
@@ -412,7 +412,7 @@ if ($LASTEXITCODE -ne 0) {
 Write-Success "Задача $TaskName зарегистрирована"
 
 Write-Step "Первый запуск агента"
-& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $agentPath
+& powershell.exe -NoProfile -ExecutionPolicy Bypass -File $agentPath -ConfigPath $configPath
 if ($LASTEXITCODE -ne 0) {
     throw "Первый запуск агента завершился с ошибкой."
 }

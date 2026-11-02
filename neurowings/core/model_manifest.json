@@ -1,0 +1,7 @@
+{
+  "stage2_portable.pth": "52b1b6fcd9aa11bfd10ad2d76d9c164f13976bdc0a6e083fc35012f545a409d8",
+  "stage2_best.pth": "ff33f68df300b6ea2138c4679019a3d40560a927ec079c9cabcca318570795f3",
+  "yolo_detect_best.pt": "d73499bcdbae85a2c7b39e50c3990340c78c7ed42040c76f0aa03a4306090359",
+  "subpixel_best.pth": "995969d3bba55ff0c19382a46cffddb6e8f3e66ed0ed22db5d8a2874d74d598b",
+  "yolo_pose_best.pt": "640c68ca3204b3ab46e2b89947ae39757e49180af17869741ee2735b34733b82"
+}
