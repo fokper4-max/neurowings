@@ -5,7 +5,7 @@
 ; Настройки
 
 !define PRODUCT_NAME "НейроКрылья"
-!define PRODUCT_VERSION "2.1.0"
+!define PRODUCT_VERSION "2.2.0"
 !define PRODUCT_PUBLISHER "Команда НейроКрылья"
 !define PRODUCT_WEB_SITE "https://github.com/yourusername/neurowings"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
@@ -98,7 +98,7 @@ FunctionEnd
 ; Функция проверки Python
 
 Function CheckPython
-    ; Проверяем наличие Python 3.8+
+    ; Проверяем наличие Python 3.8+ (через sys.version_info, чтобы избежать ошибки "Python 3.10" S< "Python 3.8")
     StrCpy $PythonNeeded "0"
 
     nsExec::ExecToStack 'python --version'
@@ -111,10 +111,12 @@ Function CheckPython
     ${Else}
         DetailPrint "Python обнаружен: $1"
 
-        ; Проверяем версию (нужен 3.8+)
-        ${If} $1 S< "Python 3.8"
+        ; Проверяем версию численно через sys.version_info >= (3, 8)
+        nsExec::Exec 'python -c "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"'
+        Pop $2
+        ${If} $2 != 0
             StrCpy $PythonNeeded "1"
-            DetailPrint "Версия Python устарела, требуется обновление"
+            DetailPrint "Версия Python устарела, требуется обновление до 3.8+"
         ${EndIf}
     ${EndIf}
 FunctionEnd

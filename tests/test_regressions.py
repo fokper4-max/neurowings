@@ -118,4 +118,231 @@ class Regression(unittest.TestCase):
    with patch.object(openpyxl.Workbook,'save',side_effect=OSError('synthetic disk failure')):
     with self.assertRaises(OSError):widget._do_export(target)
    self.assertEqual(target.read_bytes(),old)
-unittest.main()
+
+ # === НОВЫЕ ТЕСТЫ v2.2.0 ===
+
+ def _make_analyzed_wing(self, ci: float, dsa: float, hi: float, enabled: bool = True) -> Wing:
+  """Создать тестовое крыло с заданными индексами (CI, DsA, HI)."""
+  pts = [
+   WingPoint(1161.0, 2838.0),
+   WingPoint(1810.0, 2789.0),
+   WingPoint(1430.0, 2787.0),
+   WingPoint(1244.0, 2791.0),
+   WingPoint(1422.0, 2668.0),
+   WingPoint(1506.0, 2623.0),
+   WingPoint(1556.0, 2628.0),
+   WingPoint(1404.0, 2497.0),
+  ]
+  w = Wing(points=pts, is_enabled=enabled)
+  possible, idx_valid = identify_breed(ci, dsa, hi)
+  w.analysis = WingAnalysis(
+   is_valid=True,
+   CI=ci,
+   DsA=dsa,
+   HI=hi,
+   breeds=possible,
+   index_valid=idx_valid,
+   is_identified=len(possible) > 0,
+  )
+  return w
+
+ def test_colony_analysis_service_adaptive_breeds(self):
+  """Проверка ColonyAnalysisService и адаптивной интерпретации для Carnica, Carpatica, Mellifera и пустой пробы."""
+  from neurowings.core.colony_analysis import analyze_colony
+  from neurowings.ui.interpretation_widget import InterpretationWidget
+
+  # 1. Чистопородная выборка Carnica (CI~2.55, DsA~+2.2, HI~0.98)
+  carnica_wings = [
+   self._make_analyzed_wing(2.50 + (i % 5) * 0.02, 2.0 + (i % 4) * 0.2, 0.98 + (i % 3) * 0.01)
+   for i in range(30)
+  ]
+  summary_carn = analyze_colony(carnica_wings, target_breed="Carnica", reanalyze_wings=False)
+  self.assertEqual(summary_carn.eval_breed, "Carnica")
+  self.assertGreaterEqual(summary_carn.total_score, 13)
+  self.assertNotIn("Помесь", summary_carn.verdict_title)
+
+  interp = InterpretationWidget()
+  interp.set_target_breed("Carnica")
+  interp.update_data(carnica_wings)
+  text_carn = interp.text_edit.toPlainText()
+  self.assertIn("Carnica", text_carn)
+  self.assertNotIn("СИЛЬНАЯ МЕТИЗАЦИЯ", text_carn)
+
+  # 2. Чистопородная выборка Carpatica (CI~2.55, DsA~+2.5, HI~0.88)
+  carpatica_wings = [
+   self._make_analyzed_wing(2.54 + (i % 4) * 0.02, 2.3 + (i % 4) * 0.15, 0.87 + (i % 3) * 0.01)
+   for i in range(30)
+  ]
+  summary_carp = analyze_colony(carpatica_wings, target_breed="Carpatica", reanalyze_wings=False)
+  self.assertEqual(summary_carp.eval_breed, "Carpatica")
+  self.assertGreaterEqual(summary_carp.total_score, 13)
+
+  # 3. Чистопородная выборка Mellifera (CI~1.62, DsA~-3.5, HI~0.83)
+  mellifera_wings = [
+   self._make_analyzed_wing(1.60 + (i % 4) * 0.02, -3.6 + (i % 4) * 0.15, 0.82 + (i % 3) * 0.01)
+   for i in range(30)
+  ]
+  summary_mel = analyze_colony(mellifera_wings, target_breed="Mellifera", reanalyze_wings=False)
+  self.assertEqual(summary_mel.dominant_breed, "Mellifera")
+  self.assertGreaterEqual(summary_mel.total_score, 13)
+
+  # 4. Выборка с identified == 0 (аномальные индексы вне всех пород): не должно быть фантомной Mellifera!
+  unidentified_wings = [self._make_analyzed_wing(0.75, -15.0, 0.40) for _ in range(5)]
+  summary_zero = analyze_colony(unidentified_wings, target_breed="auto", reanalyze_wings=False)
+  self.assertEqual(summary_zero.identified, 0)
+  self.assertEqual(summary_zero.dominant_breed_str, "—")
+  self.assertEqual(summary_zero.ci_hyb_score + summary_zero.dsa_hyb_score + summary_zero.hi_hyb_score, 0)
+  self.assertLessEqual(summary_zero.total_score, 0)
+
+ def test_wing_disabled_excluded_from_statistics(self):
+  """Отключение крыла чекбоксом (wing.is_enabled = False) исключает его из статистики семьи."""
+  from neurowings.core.colony_analysis import analyze_colony
+  good_wing = self._make_analyzed_wing(1.65, -3.2, 0.82, enabled=True)
+  outlier_wing = self._make_analyzed_wing(3.20, 4.5, 1.05, enabled=False)
+
+  summary = analyze_colony([good_wing, outlier_wing], reanalyze_wings=False)
+  self.assertEqual(summary.total_wings_all, 2)
+  self.assertEqual(summary.total, 1)
+  self.assertEqual(summary.valid_count, 1)
+  self.assertAlmostEqual(summary.ci.mean, 1.65, places=4)
+
+ def test_pdf_passport_generation(self):
+  """Генерация PDF-паспорта семьи (generate_pdf_passport) создаёт непустой PDF-файл."""
+  from neurowings.core.pdf_passport import generate_pdf_passport
+  wings = [
+   self._make_analyzed_wing(2.52 + (i % 5) * 0.03, 2.1 + (i % 4) * 0.2, 0.84 + (i % 3) * 0.01)
+   for i in range(25)
+  ]
+  with tempfile.TemporaryDirectory() as t:
+   pdf_path = Path(t) / "passport.pdf"
+   out = generate_pdf_passport(
+    wings,
+    pdf_path,
+    sample_name="Улей №12 (Тест)",
+    target_breed="Carnica",
+   )
+   self.assertTrue(out.exists())
+   header = out.read_bytes()[:5]
+   self.assertEqual(header, b"%PDF-")
+   self.assertGreater(out.stat().st_size, 5000)
+
+ def test_graphs_widget_2d_breed_map(self):
+  """Проверка 2D-карты пород в GraphsWidget (наличие отрисованного QPixmap)."""
+  from neurowings.ui.graphs_widget import GraphsWidget
+  gw = GraphsWidget()
+  wings = [
+   self._make_analyzed_wing(1.65, -3.0, 0.82),
+   self._make_analyzed_wing(2.55, 2.2, 0.85),
+  ]
+  gw.update_graphs([1.65, 2.55], [-3.0, 2.2], [0.82, 0.85], wings=wings)
+  self.assertIsNotNone(gw.graph_map_2d._pixmap)
+  self.assertFalse(gw.graph_map_2d._pixmap.isNull())
+  # Переключение режима 2D-карты
+  gw.combo_2d_mode.setCurrentIndex(1)
+  self.assertIsNotNone(gw.graph_map_2d._pixmap)
+  self.assertFalse(gw.graph_map_2d._pixmap.isNull())
+
+ def test_points_gt_preserved_on_point_moved(self):
+  """Сохранение эталонных точек points_gt при ручном сдвиге точки через _on_point_moved."""
+  from unittest.mock import patch
+  from neurowings.ui.main_window import MainWindow
+  with tempfile.TemporaryDirectory() as t:
+   tps_path = Path(t) / "gt.tps"
+   pts = [(1161.0, 2838.0), (1810.0, 2789.0), (1430.0, 2787.0), (1244.0, 2791.0),
+          (1422.0, 2668.0), (1506.0, 2623.0), (1556.0, 2628.0), (1404.0, 2497.0)]
+   img = ImageData(Path(t) / "gt.jpg", wings=[Wing(points=[WingPoint(x, y) for x, y in pts])], width=3000, height=4000)
+   save_tps_from_image(img, tps_path)
+
+   loaded = ImageData(Path(t) / "gt.jpg", width=3000, height=4000)
+   load_tps_into_image(loaded, tps_path)
+   self.assertEqual(len(loaded.wings[0].points_gt), 8)
+   orig_gt_x = loaded.wings[0].points_gt[0].x
+
+   with patch.object(MainWindow, '_load_models'), patch.object(MainWindow, '_load_gpt_config'):
+    win = MainWindow()
+   win.current_image = loaded
+   win.images[str(loaded.path)] = loaded
+   win._on_point_moved(0, 0, orig_gt_x + 50.0, 2800.0)
+
+   # Рабочая точка изменилась, а эталон points_gt остался неизменным!
+   self.assertEqual(loaded.wings[0].points[0].x, orig_gt_x + 50.0)
+   self.assertEqual(loaded.wings[0].points_gt[0].x, orig_gt_x)
+   # При переключении источника на 'gt' возвращается эталонная координата
+   win._set_all_points_model('gt')
+   active = loaded.wings[0].get_active_points()
+   self.assertEqual(active[0][0], orig_gt_x)
+   win.close()
+
+ def test_short_vein_denominator_and_nan_save_protection(self):
+  """Защита от коротких отрезков жилок (dist(P6, P7) < 0.5) и защита от NaN при сохранении."""
+  pts = [
+   (1161.0, 2838.0),
+   (1810.0, 2789.0),
+   (1430.0, 2787.0),
+   (1244.0, 2791.0),
+   (1422.0, 2668.0),
+   (1506.0, 2623.0),
+   (1506.1, 2623.1),  # P7 почти совпадает с P6 (dist ~ 0.14 < 0.5)
+   (1404.0, 2497.0),
+  ]
+  wing = Wing(points=[WingPoint(x, y) for x, y in pts])
+  wing.analyze(image_height=4000, image_width=3000)
+  self.assertFalse(wing.analysis.is_valid)
+  self.assertIn("жилки", wing.analysis.invalid_reason)
+
+  # Защита от сохранения NaN в TPS
+  with tempfile.TemporaryDirectory() as t:
+   p = Path(t) / "nan.tps"
+   nan_wing = Wing(points=[WingPoint(float('nan'), 10.0)] + [WingPoint(i + 1.0, i + 2.0) for i in range(7)])
+   d = ImageData(Path("nan.jpg"), wings=[nan_wing], width=100, height=100)
+   with self.assertRaises(ValueError):
+    save_tps_from_image(d, p)
+
+  # Проверка классов Руттнера и конвертации в проценты Алпатова
+  self.assertAlmostEqual(ci_to_alpatov_classic(2.0), 50.0, places=4)
+  ruttner = calculate_ruttner_classes([-3.5, 0.0, 2.5])
+  self.assertEqual(ruttner["minus"], 1)
+  self.assertEqual(ruttner["zero"], 1)
+  self.assertEqual(ruttner["plus"], 1)
+
+ def test_hardware_profiler_and_adaptive_canvas(self):
+  """Проверка HardwareProfiler (4 режима мощности, TTA) и адаптации точек для больших сканов / 5K экранов."""
+  from unittest.mock import patch
+  from neurowings.core.hardware_profiler import HardwareProfiler
+  from neurowings.ui.main_window import MainWindow
+
+  specs = HardwareProfiler.detect_specs()
+  self.assertGreaterEqual(specs.logical_cores, 1)
+  self.assertGreater(specs.ram_total_gb, 0.5)
+
+  p_ultra = HardwareProfiler.apply_profile("ultra_quality")
+  self.assertTrue(p_ultra.use_tta)
+  self.assertEqual(len(p_ultra.tta_scales), 3)
+  self.assertEqual(p_ultra.det_imgsz, 1280)
+
+  p_turbo = HardwareProfiler.apply_profile("turbo_speed")
+  self.assertFalse(p_turbo.use_tta)
+  self.assertGreaterEqual(p_turbo.pose_batch_size, 16)
+
+  p_eco = HardwareProfiler.apply_profile("eco")
+  self.assertEqual(p_eco.pose_batch_size, 4)
+  self.assertTrue(p_eco.aggressive_gc)
+
+  p_auto = HardwareProfiler.apply_profile("auto")
+  self.assertIn(p_auto.mode, ("auto",))
+
+  # Проверка точного размера точек (radius <= 1.0 px = диаметр <= 2.0 px) и невидимой зоны захвата мыши
+  with patch.object(MainWindow, '_load_models'), patch.object(MainWindow, '_load_gpt_config'):
+   win = MainWindow()
+  pts = [(1161.0, 2838.0), (1810.0, 2789.0), (1430.0, 2787.0), (1244.0, 2791.0),
+         (1422.0, 2668.0), (1506.0, 2623.0), (1556.0, 2628.0), (1404.0, 2497.0)]
+  w = Wing(points=[WingPoint(x, y) for x, y in pts])
+  win.current_image = ImageData(Path("huge_scan.jpg"), wings=[w], width=9359, height=3842)
+  win._update_display()
+  self.assertEqual(len(win.point_items), 8)
+  self.assertLessEqual(win.point_items[0].radius, 1.0)
+  self.assertGreaterEqual(win.point_items[0].hit_radius, 6.0)
+  win.close()
+
+if __name__=='__main__':
+ unittest.main()

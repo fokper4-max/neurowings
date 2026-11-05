@@ -12,7 +12,7 @@ from PyQt5.QtGui import QColor
 # =============================================================================
 
 APP_NAME = "НейроКрылья"
-APP_VERSION = "2.1.0"  # Исправление onefile-упаковки Pillow AVIF и guards по ресурсам
+APP_VERSION = "2.2.0"  # Модульная архитектура, PDF-паспорт, 2D-карта породности и UX для пасечника
 APP_AUTHOR = "Дмитрий Дубровский"
 APP_MAX_URL = "https://max.ru/u/f9LHodD0cOIbZcReW1B_n2lDumCww_8mo2-Kjv_3dok65ZPHlJWUNkq-MVo"
 APP_TELEGRAM_LABEL = "@NeuroWings_bee"
@@ -41,8 +41,8 @@ COLOR_GT = QColor(0, 255, 0)        # Зелёный (Ground Truth)
 # НАСТРОЙКИ ОТОБРАЖЕНИЯ
 # =============================================================================
 
-DEFAULT_POINT_RADIUS = 3
-DEFAULT_TEXT_SIZE = 10
+DEFAULT_POINT_RADIUS = 1  # Радиус 1 px = диаметр точки 2 px (не перекрывает жилки крыла)
+DEFAULT_TEXT_SIZE = 7
 
 # =============================================================================
 # ПОРОДНЫЕ ДИАПАЗОНЫ (из Excel)
@@ -53,7 +53,61 @@ BREEDS = {
     'Caucasica':  {'CI': (1.73, 2.75), 'DsA': (-2.88, 2.88),  'HI': (0.704, 1.027)},
     'Ligustica':  {'CI': (2.00, 3.29), 'DsA': (0.00, 4.81),   'HI': (0.923, 1.206)},
     'Carnica':    {'CI': (2.16, 5.67), 'DsA': (0.00, 12.39),  'HI': (0.923, 1.420)},
+    'Carpatica':  {'CI': (2.30, 3.00), 'DsA': (0.00, 10.00),  'HI': (0.850, 1.150)},
+    'Macedonica': {'CI': (2.00, 2.80), 'DsA': (-2.00, 5.00),  'HI': (0.850, 1.100)},
 }
+
+CLASSIC_BREEDS = ('Mellifera', 'Caucasica', 'Ligustica', 'Carnica')
+
+BREED_NAMES_RU = {
+    'Mellifera': 'Среднерусская (Mellifera)',
+    'Carnica': 'Карника (Carnica)',
+    'Carpatica': 'Карпатка (Carpatica)',
+    'Caucasica': 'Кавказская (Caucasica)',
+    'Ligustica': 'Итальянская (Ligustica)',
+    'Macedonica': 'Степная (Macedonica)',
+}
+
+BREED_SHORT_NAMES_RU = {
+    'Mellifera': 'Среднерусская',
+    'Carnica': 'Карника',
+    'Carpatica': 'Карпатка',
+    'Caucasica': 'Кавказская',
+    'Ligustica': 'Итальянская',
+    'Macedonica': 'Степная',
+}
+
+BREED_COLORS_HEX = {
+    'Mellifera': '#e03131',
+    'Caucasica': '#2f9e44',
+    'Ligustica': '#1971c2',
+    'Carnica': '#9c36b5',
+    'Carpatica': '#f08c00',
+    'Macedonica': '#0ca678',
+}
+
+ALLOWED_IMAGE_EXTENSIONS = ('.jpg', '.jpeg', '.png', '.tif', '.tiff', '.bmp', '.webp')
+
+
+def format_breed_ru(breed_key, short: bool = False) -> str:
+    """Форматировать ключ породы (или список пород) на понятном русском языке."""
+    if not breed_key:
+        return "Помесь / вне стандарта" if short else "Помесь / Бакфаст (вне стандарта)"
+    if isinstance(breed_key, (list, tuple)):
+        valid = [b for b in breed_key if b and b != "—"]
+        if not valid:
+            return "Помесь / вне стандарта" if short else "Помесь / Бакфаст (вне стандарта)"
+        mapping = BREED_SHORT_NAMES_RU if short else BREED_NAMES_RU
+        return ", ".join(mapping.get(b, str(b)) for b in valid)
+    s = str(breed_key).strip()
+    if not s or s in ("—", "-", "None", "Помесь / Бакфаст (вне стандарта)"):
+        return "Помесь / вне стандарта" if short else "Помесь / Бакфаст (вне стандарта)"
+    if "," in s:
+        parts = [p.strip() for p in s.split(",") if p.strip()]
+        mapping = BREED_SHORT_NAMES_RU if short else BREED_NAMES_RU
+        return ", ".join(mapping.get(p, p) for p in parts)
+    mapping = BREED_SHORT_NAMES_RU if short else BREED_NAMES_RU
+    return mapping.get(s, s)
 
 # Точки, используемые для расчёта каждого индекса
 INDEX_POINTS = {

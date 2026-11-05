@@ -10,7 +10,10 @@ from typing import List, Optional, Tuple, Dict
 from pathlib import Path
 from enum import Enum
 
-from .calculations import calculate_indices, identify_breed, get_problem_points, calculate_dsa_excel
+from .calculations import (
+    calculate_indices, identify_breed, get_problem_points,
+    calculate_dsa_excel, dist, check_wing_orientation
+)
 
 
 @dataclass
@@ -26,6 +29,7 @@ class WingAnalysis:
     problem_points: List[int] = field(default_factory=list)
     is_identified: bool = False
     projection: Tuple[float, float] = (0, 0)
+    orientation_warning: str = ""
 
 
 @dataclass
@@ -54,13 +58,17 @@ class Wing:
     points_yolo: List[WingPoint] = field(default_factory=list)
     points_stage1: List[WingPoint] = field(default_factory=list)
     points_stage2: List[WingPoint] = field(default_factory=list)
+    points_gt: List[WingPoint] = field(default_factory=list)
+    is_enabled: bool = True
     # Выбранная модель для каждой точки: 'yolo', 'stage1', 'stage2'
     point_sources: List[str] = field(default_factory=lambda: ['stage2'] * 8)
     
     def get_center(self) -> Tuple[float, float]:
         """Получить центр крыла"""
-        points = [(x,y) for x,y in self.get_active_points() if math.isfinite(x) and math.isfinite(y)]
+        points = [(x, y) for x, y in self.get_active_points() if math.isfinite(x) and math.isfinite(y) and not (x == 0 and y == 0)]
         if not points:
+            if self.bbox:
+                return ((self.bbox.x1 + self.bbox.x2) / 2.0, (self.bbox.y1 + self.bbox.y2) / 2.0)
             return (0, 0)
         cx = sum(p[0] for p in points) / len(points)
         cy = sum(p[1] for p in points) / len(points)
@@ -81,6 +89,8 @@ class Wing:
                 result.append((self.points_stage1[i].x, self.points_stage1[i].y))
             elif source == 'stage2' and i < len(self.points_stage2):
                 result.append((self.points_stage2[i].x, self.points_stage2[i].y))
+            elif source == 'gt' and i < len(self.points_gt):
+                result.append((self.points_gt[i].x, self.points_gt[i].y))
             elif i < len(self.points):
                 result.append((self.points[i].x, self.points[i].y))
             else:
@@ -97,14 +107,16 @@ class Wing:
         """
         points = self.get_active_points()
         reason = ""
-        if len(points) != 8 or not all(math.isfinite(x) and math.isfinite(y) for x,y in points):
-            reason = "Требуется разметка восьми конечных координат"
-        elif any(x < 0 or y < 0 or (image_width and x >= image_width) or (image_height and y >= image_height) for x,y in points):
-            reason = "Точка вне изображения"
-        elif any(math.hypot(x-u,y-v) < 1e-6 for i,(x,y) in enumerate(points) for u,v in points[i+1:]):
-            reason = "Совпавшие точки"
-        elif max(abs((x-points[0][0])*(v-points[0][1])-(y-points[0][1])*(u-points[0][0])) for x,y in points[1:] for u,v in points[1:]) < 1e-6:
-            reason = "Вырожденная геометрия"
+        if len(points) != 8 or not all(math.isfinite(x) and math.isfinite(y) for x, y in points):
+            reason = "Не все 8 точек расставлены на крыле"
+        elif any(x < 0 or y < 0 or (image_width and x >= image_width) or (image_height and y >= image_height) for x, y in points):
+            reason = "Точка вышла за пределы изображения"
+        elif any(math.hypot(x - u, y - v) < 1e-6 for i, (x, y) in enumerate(points) for u, v in points[i + 1:]):
+            reason = "Совпавшие точки (проверьте разметку 8 точек)"
+        elif max(abs((x - points[0][0]) * (v - points[0][1]) - (y - points[0][1]) * (u - points[0][0])) for x, y in points[1:] for u, v in points[1:]) < 1e-6:
+            reason = "Вырожденная геометрия (точки лежат на одной прямой)"
+        elif dist(points[0], points[1]) < 1.0 or dist(points[2], points[3]) < 1.0 or dist(points[5], points[6]) < 0.5:
+            reason = "Слишком короткий отрезок жилки (точки стоят вплотную друг к другу)"
         if reason:
             self.analysis = WingAnalysis(invalid_reason=reason, problem_points=list(range(8)))
             return
@@ -120,6 +132,7 @@ class Wing:
         breeds, index_valid = identify_breed(indices['CI'], indices['DsA'], indices['HI'])
         problem_points = get_problem_points(index_valid)
         _, projection = calculate_dsa_excel(points)
+        orient = check_wing_orientation(points)
         
         self.analysis = WingAnalysis(
             is_valid=True,
@@ -130,7 +143,8 @@ class Wing:
             index_valid=index_valid,
             problem_points=problem_points,
             is_identified=len(breeds) > 0,
-            projection=projection
+            projection=projection,
+            orientation_warning=str(orient.get("warning", ""))
         )
 
 

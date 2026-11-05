@@ -26,11 +26,12 @@ def load_project(image,tps):
     wings=[]
     for value in data['wings']:
         wing=Wing()
-        for name in ['points','points_yolo','points_stage1','points_stage2']:
+        for name in ['points','points_yolo','points_stage1','points_stage2','points_gt']:
             points=value.get(name,[])
             if len(points) not in (0,8):raise ValueError('Invalid project landmark count')
             setattr(wing,name,[WingPoint(**p) for p in points])
         wing.point_sources=value.get('point_sources',['manual']*8)
+        wing.is_enabled=bool(value.get('is_enabled', True))
         wing.bbox=BBox(**value['bbox']) if value.get('bbox') else None
         wings.append(wing)
     image.wings=wings;image.width=data['width'];image.height=data['height']

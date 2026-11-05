@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-NeuroWings - Масштабируемый графический вид
+NeuroWings - Масштабируемый графический вид (v2.2.0)
 """
 
 from PyQt5.QtWidgets import (
@@ -15,8 +15,8 @@ from .graphics_items import PointItem, BBoxItem
 
 
 class ZoomableGraphicsView(QGraphicsView):
-    """Масштабируемый вид с поддержкой редактирования"""
-    
+    """Масштабируемый вид с поддержкой редактирования и перетаскивания точек в режиме просмотра"""
+
     point_clicked = pyqtSignal(int, int, int)
     point_deleted = pyqtSignal(int, int)
     scene_clicked = pyqtSignal(float, float)
@@ -26,7 +26,9 @@ class ZoomableGraphicsView(QGraphicsView):
     bbox_deleted = pyqtSignal(int)
     point_delete_requested = pyqtSignal(int, int)
     bbox_delete_requested = pyqtSignal(int)
-    
+    wing_reset_requested = pyqtSignal(int)
+    bbox_recognize_requested = pyqtSignal(int)
+
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
         self.setRenderHint(QPainter.Antialiasing)
@@ -41,37 +43,55 @@ class ZoomableGraphicsView(QGraphicsView):
         self.customContextMenuRequested.connect(self._show_context_menu)
         self._add_scroll_buttons()
         self._position_scroll_buttons()
-        
+
         self._fit_mode = True
         self._zoom = self.transform().m11()
         self._dragging_point = None
         self._drag_start_pos = None
         self.edit_mode = EditMode.VIEW
-        
+
         self._bbox_start = None
         self._bbox_rect = None
-    
+
     def _show_context_menu(self, pos):
         """Показать контекстное меню"""
         item = self.itemAt(pos)
-        
+        if item is not None and isinstance(item.parentItem(), PointItem):
+            item = item.parentItem()
+        elif item is not None and isinstance(item.parentItem(), BBoxItem):
+            item = item.parentItem()
+
         menu = QMenu(self)
-        
+
         if isinstance(item, PointItem) and item.global_idx >= 0:
-            act_delete = menu.addAction("🗑 Удалить точку")
+            act_reset = menu.addAction(f"🔄 Сбросить точки крыла №{item.wing_idx + 1} (к нейросети/TPS)")
+            act_reset.triggered.connect(
+                lambda: self.wing_reset_requested.emit(item.wing_idx)
+            )
+            menu.addSeparator()
+            act_delete = menu.addAction(f"🗑 Удалить точку №{item.point_idx + 1}")
             act_delete.triggered.connect(
                 lambda: self.point_delete_requested.emit(item.wing_idx, item.point_idx)
             )
+            act_del_wing = menu.addAction(f"🗑 Удалить всё крыло №{item.wing_idx + 1}")
+            act_del_wing.triggered.connect(
+                lambda: self.bbox_delete_requested.emit(item.wing_idx)
+            )
         elif isinstance(item, BBoxItem):
-            act_delete = menu.addAction("🗑 Удалить рамку")
+            act_rec = menu.addAction(f"⚡ Распознать 8 точек в рамке (Крыло №{item.wing_idx + 1})")
+            act_rec.triggered.connect(
+                lambda: self.bbox_recognize_requested.emit(item.wing_idx)
+            )
+            menu.addSeparator()
+            act_delete = menu.addAction("🗑 Удалить рамку и крыло")
             act_delete.triggered.connect(
                 lambda: self.bbox_delete_requested.emit(item.wing_idx)
             )
         else:
             return
-        
+
         menu.exec_(self.mapToGlobal(pos))
-    
+
     def set_edit_mode(self, mode: EditMode):
         """Установить режим редактирования"""
         self.edit_mode = mode
@@ -89,8 +109,6 @@ class ZoomableGraphicsView(QGraphicsView):
             self.setCursor(Qt.CrossCursor)
 
     def _add_scroll_buttons(self):
-        """Добавить стрелки-навигации рядом со скроллами"""
-        # Кнопки у вертикального скролла
         self.btn_up = QToolButton(self)
         self.btn_up.setText("▲")
         self.btn_up.setFixedSize(18, 18)
@@ -103,7 +121,6 @@ class ZoomableGraphicsView(QGraphicsView):
         self.btn_down.clicked.connect(lambda: self._nudge(0, 50))
         self.btn_down.setAutoRaise(True)
 
-        # Кнопки у горизонтального скролла
         self.btn_left = QToolButton(self)
         self.btn_left.setText("◀")
         self.btn_left.setFixedSize(18, 18)
@@ -127,18 +144,15 @@ class ZoomableGraphicsView(QGraphicsView):
             self.fit_in_view()
 
     def _position_scroll_buttons(self):
-        """Расположить стрелки у краёв виджета рядом со скроллами"""
         margin = 2
         sb_v = self.verticalScrollBar()
         sb_h = self.horizontalScrollBar()
-        # Вертикальные стрелки справа от контента, по центру высоты
         x_v = self.viewport().width() + sb_v.width() - self.btn_up.width() - margin
         mid_y = self.viewport().height() // 2
         self.btn_up.move(x_v, mid_y - self.btn_up.height() - margin)
         self.btn_down.move(x_v, mid_y + margin)
         self.btn_up.raise_()
         self.btn_down.raise_()
-        # Горизонтальные стрелки снизу, по центру ширины
         y_h = self.viewport().height() + sb_h.height() - self.btn_left.height() - margin
         mid_x = self.viewport().width() // 2
         self.btn_left.move(mid_x - self.btn_left.width() - margin, y_h)
@@ -147,12 +161,10 @@ class ZoomableGraphicsView(QGraphicsView):
         self.btn_right.raise_()
 
     def _nudge(self, dx, dy):
-        """Сдвиг вида кнопками-стрелками"""
         self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + dx)
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() + dy)
-    
+
     def wheelEvent(self, event):
-        """Масштабирование колесом мыши"""
         self._fit_mode = False
         factor = 1.25
         if event.angleDelta().y() > 0:
@@ -161,11 +173,10 @@ class ZoomableGraphicsView(QGraphicsView):
                 self._zoom *= factor
         else:
             if self._zoom > 0.05:
-                self.scale(1/factor, 1/factor)
+                self.scale(1 / factor, 1 / factor)
                 self._zoom /= factor
-    
+
     def keyPressEvent(self, event):
-        """Навигация клавиатурой"""
         key = event.key()
         speed = 50
         if key in (Qt.Key_W, Qt.Key_Up):
@@ -178,21 +189,22 @@ class ZoomableGraphicsView(QGraphicsView):
             self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + speed)
         else:
             super().keyPressEvent(event)
-    
+
     def mousePressEvent(self, event):
         if event.button() == Qt.LeftButton:
             item = self.itemAt(event.pos())
+            if item is not None and isinstance(item.parentItem(), PointItem):
+                item = item.parentItem()
             scene_pos = self.mapToScene(event.pos())
 
             if isinstance(item, PointItem) and item.global_idx >= 0:
-                # Всегда посылаем сигнал о клике на точку (для выделения в списке)
                 self.point_clicked.emit(item.global_idx, item.wing_idx, item.point_idx)
 
-                # ЛЮБУЮ точку можно редактировать в режиме редактирования
-                if self.edit_mode == EditMode.EDIT:
+                # Разрешаем перетаскивать точку мышкой как в режиме EDIT, так и прямо в режиме VIEW!
+                if self.edit_mode in (EditMode.EDIT, EditMode.VIEW):
                     self._dragging_point = item
                     self._drag_start_pos = scene_pos
-                return  # Всегда выходим после клика на точку
+                return
 
             if self.edit_mode == EditMode.ADD:
                 self.scene_clicked.emit(scene_pos.x(), scene_pos.y())
@@ -206,14 +218,14 @@ class ZoomableGraphicsView(QGraphicsView):
                 return
 
         super().mousePressEvent(event)
-    
+
     def mouseMoveEvent(self, event):
         scene_pos = self.mapToScene(event.pos())
-        
+
         if self._dragging_point is not None:
             self._dragging_point.setPos(scene_pos)
             return
-        
+
         if self._bbox_start is not None and self._bbox_rect is not None:
             x1 = min(self._bbox_start.x(), scene_pos.x())
             y1 = min(self._bbox_start.y(), scene_pos.y())
@@ -221,21 +233,21 @@ class ZoomableGraphicsView(QGraphicsView):
             y2 = max(self._bbox_start.y(), scene_pos.y())
             self._bbox_rect.setRect(x1, y1, x2 - x1, y2 - y1)
             return
-        
+
         super().mouseMoveEvent(event)
-    
+
     def mouseReleaseEvent(self, event):
         if self._dragging_point is not None:
             pos = self._dragging_point.pos()
-            self.point_moved.emit(
-                self._dragging_point.wing_idx,
-                self._dragging_point.point_idx,
-                pos.x(), pos.y()
-            )
+            start = self._drag_start_pos
+            wing_idx = self._dragging_point.wing_idx
+            point_idx = self._dragging_point.point_idx
             self._dragging_point = None
             self._drag_start_pos = None
+            if start is None or abs(pos.x() - start.x()) > 0.01 or abs(pos.y() - start.y()) > 0.01:
+                self.point_moved.emit(wing_idx, point_idx, pos.x(), pos.y())
             return
-        
+
         if self._bbox_start is not None and self._bbox_rect is not None:
             rect = self._bbox_rect.rect()
             self.scene().removeItem(self._bbox_rect)
@@ -248,9 +260,9 @@ class ZoomableGraphicsView(QGraphicsView):
             self._bbox_start = None
             self._bbox_rect = None
             return
-        
+
         super().mouseReleaseEvent(event)
-    
+
     def fit_in_view(self):
         """Подогнать вид под содержимое"""
         self._fit_mode = True

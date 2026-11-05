@@ -30,7 +30,14 @@ def load_tps_into_image(img_data, tps_path):
             if lines[i].upper().startswith('IMAGE=') and Path(lines[i].split('=',1)[1].replace('\\','/')).name.casefold()!=img_data.path.name.casefold():
                 raise ValueError('TPS относится к другому изображению')
             i+=1
-        wings.extend(Wing(points=points[j:j+8],point_sources=['gt']*8) for j in range(0,count,8))
+        wings.extend(
+            Wing(
+                points=[WingPoint(p.x, p.y) for p in points[j:j+8]],
+                points_gt=[WingPoint(p.x, p.y) for p in points[j:j+8]],
+                point_sources=['gt'] * 8,
+            )
+            for j in range(0, count, 8)
+        )
     img_data.width=width; img_data.height=height; img_data.wings=wings
 
 def save_tps_from_image(img_data, tps_path):

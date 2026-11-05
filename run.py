@@ -1,24 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-НейроКрылья - RUN
+НейроКрылья - RUN (v2.2.0)
 
-Добавлено:
-- авто-очистка __pycache__ и *.pyc/*.pyo при старте (в лог)
-- вывод структуры проекта (дерево) в лог
-- вывод реальных путей загруженных модулей (откуда импортировались)
-- перехват исключений Qt-событий (чтобы приложение не закрывалось молча)
+Точка входа десктопного приложения:
+- Ротируемое логирование (RotatingFileHandler, 2 МБ, 3 файла резервных копий)
+- Предзагрузка PyTorch до инициализации Qt
+- Перехват необработанных исключений в слотах/событиях Qt (SafeApplication)
+- Поддержка пакетного CLI режима (--recognize)
 """
 
 import sys
 import os
-import shutil
 import logging
+from logging.handlers import RotatingFileHandler
 import traceback
 import platform
 from datetime import datetime
 from pathlib import Path
-
 
 
 BASE_DIR = Path(__file__).resolve().parent
@@ -26,19 +25,30 @@ LOG_DIR = Path(os.getenv("LOCALAPPDATA", str(Path.home() / ".local" / "state")))
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 LOG_FILE = LOG_DIR / "neurowings.log"
 
-# Настройка логирования с обработкой ошибок
+for _stream in (sys.stdout, sys.stderr):
+    if hasattr(_stream, "reconfigure"):
+        try:
+            _stream.reconfigure(encoding="utf-8", errors="replace")
+        except Exception:
+            pass
+
+# Настройка логирования с ротацией и обработкой ошибок
 try:
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
         handlers=[
-            logging.FileHandler(LOG_FILE, mode="w", encoding="utf-8"),
+            RotatingFileHandler(
+                LOG_FILE,
+                maxBytes=2 * 1024 * 1024,
+                backupCount=3,
+                encoding="utf-8",
+            ),
             logging.StreamHandler(sys.stdout),
         ],
     )
 except (PermissionError, OSError) as e:
-    # Fallback: только консольное логирование
     logging.basicConfig(
         level=logging.INFO,
         format="%(asctime)s | %(levelname)-8s | %(name)s | %(message)s",
@@ -78,69 +88,6 @@ def _log_startup():
     logger.info("=" * 100)
 
 
-def _clean_cache(base_dir: Path) -> None:
-    removed_dirs = 0
-    removed_files = 0
-    errors = 0
-    logger.info("CACHE CLEAN: START")
-
-    skip_dirs = {".git", ".venv", "venv", "build", "dist", ".idea", ".vscode"}
-
-    for root, dirs, files in os.walk(base_dir, topdown=True):
-        dirs[:] = [d for d in dirs if d not in skip_dirs]
-        if "__pycache__" in dirs:
-            cache_dir = Path(root) / "__pycache__"
-            try:
-                shutil.rmtree(cache_dir, ignore_errors=False)
-                removed_dirs += 1
-                logger.info(f"Removed dir: {cache_dir.relative_to(base_dir)}")
-            except Exception as e:
-                errors += 1
-                logger.error(f"Failed remove dir {cache_dir}: {e}")
-            dirs.remove("__pycache__")
-
-    for p in base_dir.rglob("*"):
-        if p.is_file() and p.suffix in {".pyc", ".pyo"}:
-            try:
-                p.unlink()
-                removed_files += 1
-                logger.info(f"Removed file: {p.relative_to(base_dir)}")
-            except Exception as e:
-                errors += 1
-                logger.error(f"Failed remove file {p}: {e}")
-
-    logger.info(f"CACHE CLEAN: DONE (dirs={removed_dirs}, files={removed_files}, errors={errors})")
-
-
-def _log_tree(base_dir: Path, max_depth: int = 25) -> None:
-    logger.info("=" * 100)
-    logger.info(f"PROJECT TREE (max_depth={max_depth})")
-    logger.info(f"ROOT: {base_dir}")
-    logger.info("-" * 100)
-
-    def depth(p: Path) -> int:
-        rel = p.relative_to(base_dir)
-        return 0 if rel == Path(".") else len(rel.parts)
-
-    paths = sorted(base_dir.rglob("*"), key=lambda x: (x.is_file(), str(x).lower()))
-    for p in paths:
-        d = depth(p)
-        if d > max_depth:
-            continue
-        indent = "  " * d
-        rel = p.relative_to(base_dir)
-        if p.is_dir():
-            logger.info(f"{indent}[D] {rel}/")
-        else:
-            try:
-                size = p.stat().st_size
-            except Exception:
-                size = -1
-            logger.info(f"{indent}[F] {rel} ({size} bytes)")
-
-    logger.info("=" * 100)
-
-
 def _install_excepthook():
     def _hook(exc_type, exc, tb):
         logger.critical("UNCAUGHT EXCEPTION", exc_info=(exc_type, exc, tb))
@@ -170,9 +117,10 @@ def _install_qt_message_handler():
     except Exception as e:
         logger.warning(f"Qt message handler: NOT installed ({e})")
 
-def _import_torch() -> None:
+
+def _import_torch() -> bool:
     """Import torch before Qt with clearer diagnostics."""
-    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")  # avoid OpenMP runtime clashes
+    os.environ.setdefault("KMP_DUPLICATE_LIB_OK", "TRUE")
     os.environ.setdefault("KMP_INIT_AT_FORK", "FALSE")
     try:
         import torch  # noqa: F401
@@ -181,6 +129,7 @@ def _import_torch() -> None:
             getattr(torch, "__version__", "unknown"),
             getattr(torch, "__file__", "unknown"),
         )
+        return True
     except Exception:
         logger.critical(
             "PyTorch import failed (missing VC++ runtime or corrupted DLLs). "
@@ -194,23 +143,19 @@ def main():
     if "--recognize" in sys.argv:
         from neurowings.batch_cli import main as batch_main
         return batch_main(sys.argv[1:])
+
     _install_excepthook()
     _log_startup()
 
-    # Очищаем только кеш neurowings (не всего BASE_DIR - там может быть PyTorch)
     neurowings_dir = BASE_DIR / "neurowings"
-    if neurowings_dir.exists():
-        pass  # Release startup never deletes source/cache files
-        # Логируем только структуру neurowings, не всего проекта (иначе PyTorch = часы ожидания)
-        pass  # Avoid expensive startup tree scans
-    else:
+    if not neurowings_dir.exists():
         logger.warning(f"Директория neurowings не найдена: {neurowings_dir}")
 
     _import_torch()
 
     try:
         from PyQt5.QtWidgets import QApplication
-        from PyQt5.QtGui import QColor, QPalette, QIcon
+        from PyQt5.QtGui import QIcon
         from PyQt5.QtCore import Qt
     except ImportError as e:
         logger.error(f"PyQt5 не установлен: {e}")
@@ -227,12 +172,10 @@ def main():
                 logger.error(traceback.format_exc())
                 return False
 
-    # Импорт проекта
     try:
         from neurowings import MainWindow
         import neurowings.core.calculations as calc
         logger.info(f"Loaded neurowings.core.calculations from: {getattr(calc, '__file__', 'unknown')}")
-        # Санити-чек DsA на контрольных точках из 58 WD.tps (первые 8 точек):
         pts = [
             (1161.0, 2838.0),
             (1810.0, 2789.0),
@@ -250,34 +193,17 @@ def main():
         logger.error(traceback.format_exc())
         sys.exit(1)
 
-    # Приложение
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
     QApplication.setAttribute(Qt.AA_UseHighDpiPixmaps, True)
+    if hasattr(Qt, "HighDpiScaleFactorRoundingPolicy") and hasattr(QApplication, "setHighDpiScaleFactorRoundingPolicy"):
+        QApplication.setHighDpiScaleFactorRoundingPolicy(
+            Qt.HighDpiScaleFactorRoundingPolicy.PassThrough
+        )
     app = SafeApplication(sys.argv)
     app.setApplicationName("НейроКрылья")
     icon_path = _resolve_app_icon()
     if icon_path is not None:
         app.setWindowIcon(QIcon(str(icon_path)))
-
-    try:
-        palette = QPalette()
-        palette.setColor(QPalette.Window, QColor(53, 53, 53))
-        palette.setColor(QPalette.WindowText, Qt.white)
-        palette.setColor(QPalette.Base, QColor(25, 25, 25))
-        palette.setColor(QPalette.AlternateBase, QColor(53, 53, 53))
-        palette.setColor(QPalette.ToolTipBase, Qt.white)
-        palette.setColor(QPalette.ToolTipText, Qt.white)
-        palette.setColor(QPalette.Text, Qt.white)
-        palette.setColor(QPalette.Button, QColor(53, 53, 53))
-        palette.setColor(QPalette.ButtonText, Qt.white)
-        palette.setColor(QPalette.BrightText, Qt.red)
-        palette.setColor(QPalette.Link, QColor(42, 130, 218))
-        palette.setColor(QPalette.Highlight, QColor(42, 130, 218))
-        palette.setColor(QPalette.HighlightedText, Qt.black)
-        app.setPalette(palette)
-    except Exception:
-        logger.warning("Theme setup failed:")
-        logger.warning(traceback.format_exc())
 
     try:
         window = MainWindow()

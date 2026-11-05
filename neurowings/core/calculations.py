@@ -170,6 +170,101 @@ def ci_to_alpatov(ci: float) -> float:
     return float((0.0381 * ci + 0.9982) / ci)
 
 
+def ci_to_alpatov_classic(ci: float) -> float:
+    """Классический кубитальный индекс в процентах по В. В. Алпатову (b/a * 100% = 100 / CI)."""
+    if ci is None or not math.isfinite(float(ci)) or float(ci) <= 0:
+        return 0.0
+    return float(100.0 / float(ci))
+
+
+def calculate_ruttner_classes(dsa_values: List[float]) -> Dict[str, float]:
+    """
+    Классификация дискоидального смещения (DsA) по Ф. Руттнеру:
+      '-' (отрицательное): DsA < -0.5°
+      '0' (нейтральное):  -0.5° <= DsA <= +0.5°
+      '+' (положительное): DsA > +0.5°
+    """
+    valid = [float(v) for v in (dsa_values or []) if v is not None and math.isfinite(float(v))]
+    total = len(valid)
+    if total == 0:
+        return {
+            "minus": 0, "zero": 0, "plus": 0, "total": 0,
+            "pct_minus": 0.0, "pct_zero": 0.0, "pct_plus": 0.0,
+        }
+    minus_cnt = sum(1 for v in valid if v < -0.5)
+    zero_cnt = sum(1 for v in valid if -0.5 <= v <= 0.5)
+    plus_cnt = sum(1 for v in valid if v > 0.5)
+    return {
+        "minus": minus_cnt,
+        "zero": zero_cnt,
+        "plus": plus_cnt,
+        "total": total,
+        "pct_minus": 100.0 * minus_cnt / total,
+        "pct_zero": 100.0 * zero_cnt / total,
+        "pct_plus": 100.0 * plus_cnt / total,
+    }
+
+
+def check_wing_orientation(points: List[Point]) -> Dict[str, object]:
+    """
+    Проверка топологии и ориентации 8 точек крыла (в экранных или WingsDig координатах).
+    Проверяет:
+    - не перепутаны ли местами точки 3 и 4 (в норме проекция P4 ближе к P1, чем P3: t_p4 < t_p3);
+    - порядок точек кубитальной ячейки P5 -> P6 -> P7 вдоль оси P1 -> P2.
+    """
+    if not isinstance(points, (list, tuple)) or len(points) != 8:
+        return {"is_standard": False, "is_swapped_p3_p4": False, "is_inverted_cubital": False, "warning": "Неполный набор точек"}
+
+    p1, p2, p3, p4, p5, p6, p7, p8 = points
+    vx = p2[0] - p1[0]
+    vy = p2[1] - p1[1]
+    vv = vx * vx + vy * vy
+    if vv < 1e-6:
+        return {"is_standard": False, "is_swapped_p3_p4": False, "is_inverted_cubital": False, "warning": "Вырожденная базовая ось P1-P2"}
+
+    def _proj_t(pt: Point) -> float:
+        return ((pt[0] - p1[0]) * vx + (pt[1] - p1[1]) * vy) / vv
+
+    t3 = _proj_t(p3)
+    t4 = _proj_t(p4)
+    t5 = _proj_t(p5)
+    t6 = _proj_t(p6)
+    t7 = _proj_t(p7)
+
+    swapped_p3_p4 = t3 < t4
+    inverted_cubital = t5 > t7
+    warnings = []
+    if swapped_p3_p4:
+        warnings.append("Возможно, перепутаны точки 3 и 4")
+    if inverted_cubital:
+        warnings.append("Инвертирован порядок точек кубитальной ячейки (5–6–7)")
+
+    return {
+        "is_standard": not (swapped_p3_p4 or inverted_cubital),
+        "is_swapped_p3_p4": swapped_p3_p4,
+        "is_inverted_cubital": inverted_cubital,
+        "warning": "; ".join(warnings),
+    }
+
+
+def calculate_breed_distance(ci: float, dsa: float, hi: float, breed_name: str) -> float:
+    """
+    Нормированное 3D-расстояние от (ci, dsa, hi) до центра эталонного диапазона породы.
+    Значение <= 1.0 означает попадание внутрь эталонного эллипсоида породы.
+    """
+    from .constants import BREED_RANGES
+    if breed_name not in BREED_RANGES:
+        return float("inf")
+    ranges = BREED_RANGES[breed_name]
+    d2 = 0.0
+    for val, key in ((ci, "CI"), (dsa, "DsA"), (hi, "HI")):
+        lo, hi_bound = ranges[key]
+        center = 0.5 * (lo + hi_bound)
+        half = max(1e-6, 0.5 * (hi_bound - lo))
+        d2 += ((float(val) - center) / half) ** 2
+    return float(math.sqrt(d2 / 3.0))
+
+
 # Совместимость с core/__init__.py (если импортирует эти имена)
 def calculate_ci(points: List[Point]) -> float:
     return calculate_indices(points).get("CI", 0.0)
@@ -341,35 +436,19 @@ def calculate_hybridization_score(
     num_bins = 30
     bin_width = (max_val - min_val) / num_bins
 
-    # Создаём классы (бины)
-    bins = []
-    for i in range(num_bins):
-        bin_start = min_val + i * bin_width
-        bin_end = min_val + (i + 1) * bin_width
-        bins.append((bin_start, bin_end))
-
-    # Распределяем крылья по классам
-    bin_counts = [0] * num_bins
-    for value in valid_values:
-        # Находим, в какой класс попадает значение
-        for i, (bin_start, bin_end) in enumerate(bins):
-            if i == num_bins - 1:  # Последний класс включает правую границу
-                if bin_start <= value <= bin_end:
-                    bin_counts[i] += 1
-                    break
-            else:
-                if bin_start <= value < bin_end:
-                    bin_counts[i] += 1
-                    break
-
     rank1 = rank2 = 0
     for value in valid_values:
-        distance = max(breed_min-value, value-breed_max, 0)
-        if distance > 3*bin_width: rank2 += 1
-        elif distance > 0: rank1 += 1
-    pct_rank2=100*rank2/total_wings
-    pct_rank1=100*rank1/total_wings
-    if pct_rank2 > 2 or pct_rank1 > 15: return 0
-    if pct_rank2 > 1 or pct_rank1 > 7.5: return 1
-    if pct_rank2 > 0 or pct_rank1 > 0: return 2
+        distance = max(breed_min - value, value - breed_max, 0)
+        if distance > 3 * bin_width:
+            rank2 += 1
+        elif distance > 0:
+            rank1 += 1
+    pct_rank2 = 100 * rank2 / total_wings
+    pct_rank1 = 100 * rank1 / total_wings
+    if pct_rank2 > 2 or pct_rank1 > 15:
+        return 0
+    if pct_rank2 > 1 or pct_rank1 > 7.5:
+        return 1
+    if pct_rank2 > 0 or pct_rank1 > 0:
+        return 2
     return 3

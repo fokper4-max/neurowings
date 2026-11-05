@@ -10,7 +10,8 @@ __all__ = [
     'PointItem', 'WingLabelItem', 'BBoxItem', 'MeasurementLineItem',
     'ZoomableGraphicsView', 'AnalysisWidget', 'GraphsWidget',
     'InterpretationWidget', 'GlobalInterpretationWidget',
-    'BatchResultsWidget', 'PointSettingsDialog'
+    'BatchResultsWidget', 'PointSettingsDialog',
+    'WingGuideWidget', 'BeekeeperGuideDialog'
 ]
 
 
@@ -41,4 +42,7 @@ def __getattr__(name):
     if name == 'PointSettingsDialog':
         from .dialogs import PointSettingsDialog
         return PointSettingsDialog
+    if name in {'WingGuideWidget', 'BeekeeperGuideDialog'}:
+        from .wing_guide_widget import WingGuideWidget, BeekeeperGuideDialog
+        return {'WingGuideWidget': WingGuideWidget, 'BeekeeperGuideDialog': BeekeeperGuideDialog}[name]
     raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
