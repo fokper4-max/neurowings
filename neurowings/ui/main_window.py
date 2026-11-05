@@ -571,6 +571,10 @@ class MainWindow(QMainWindow):
         toolbar.addAction("📄 PDF-Паспорт", self._export_pdf)
         toolbar.addAction("❓ Как пользоваться", self._show_beekeeper_guide)
 
+        act_minimap = toolbar.addAction("🗺 Обзор", self._toggle_minimap)
+        act_minimap.setToolTip("Показать/скрыть миникарту навигации (M)")
+        act_minimap.setShortcut("M")
+
         toolbar.addSeparator()
         toolbar.addAction("⬅ панель", self._toggle_left_panel)
         toolbar.addAction("панель ➡", self._toggle_right_panel)
@@ -2173,6 +2177,10 @@ class MainWindow(QMainWindow):
             self.main_splitter.setSizes([left_width, center_width, self._saved_right_size])
             self.right_panel.setVisible(True)
             self.right_collapsed = False
+
+    def _toggle_minimap(self):
+        """Показать/скрыть миникарту навигации."""
+        self.view.toggle_minimap()
 
     def _toggle_single_wing_mode(self, checked):
         """Включение/выключение режима одиночного крыла (агрегирование по всем фото)"""

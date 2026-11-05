@@ -100,6 +100,21 @@ class InterpretationWidget(QWidget):
         self.breed_combo.currentIndexChanged.connect(self._on_breed_combo_changed)
         header.addWidget(self.breed_combo)
 
+        # Режим анализа: Чистопородная / Свободноспаренная
+        lbl_mode = QLabel("Режим:")
+        lbl_mode.setStyleSheet("font-weight: bold; color: #222222; margin-left: 10px;")
+        header.addWidget(lbl_mode)
+
+        self.mating_combo = QComboBox()
+        self.mating_combo.addItem("🐝 Чистопородная (строгий)", "purebred")
+        self.mating_combo.addItem("🔀 Свободноспаренная (мягкий)", "free_mated")
+        self.mating_combo.setToolTip(
+            "Чистопородная — строгие границы для племенных маток.\n"
+            "Свободноспаренная — допускаются бо́льшие отклонения (±15% к границам пород)."
+        )
+        self.mating_combo.currentIndexChanged.connect(self._on_mating_mode_changed)
+        header.addWidget(self.mating_combo)
+
         self.btn_pdf = QPushButton("📄 PDF-Паспорт")
         self.btn_pdf.setToolTip("Сохранить одностраничный сертификат (паспорт) пчелосемьи в PDF")
         self.btn_pdf.clicked.connect(self._export_pdf)
@@ -133,6 +148,16 @@ class InterpretationWidget(QWidget):
         if self._current_data is not None:
             self.update_interpretation(self._current_data)
 
+    def _on_mating_mode_changed(self, _index: int):
+        """Переключение режима Чистопородная / Свободноспаренная."""
+        self.mating_mode = self.mating_combo.currentData() or "purebred"
+        if self._current_data is not None:
+            self.update_interpretation(self._current_data)
+
+    def get_mating_mode(self) -> str:
+        """Вернуть текущий режим: 'purebred' или 'free_mated'."""
+        return getattr(self, 'mating_mode', 'purebred')
+
     def set_target_breed(self, breed_key: str):
         idx = self.breed_combo.findData(breed_key or "auto")
         if idx >= 0 and idx != self.breed_combo.currentIndex():
@@ -154,27 +179,40 @@ class InterpretationWidget(QWidget):
             self._gpt_button.setEnabled(has_llm)
             self._gpt_button.setVisible(has_llm)
 
-    @staticmethod
-    def _evaluate_index_for_breed(val: float, breed_key: str, index_name: str, unit: str = ""):
-        """Оценить среднее значение индекса относительно стандарта выбранной породы."""
+    def _evaluate_index_for_breed(self, val: float, breed_key: str, index_name: str, unit: str = ""):
+        """Оценить среднее значение индекса относительно стандарта выбранной породы.
+
+        В режиме 'free_mated' (свободноспаренная) границы расширяются на 15%,
+        т.к. свободноспаренные матки дают более широкий разброс признаков.
+        """
         if not breed_key or breed_key not in BREEDS:
             return f"Вне эталонных стандартов чистых пород", "bad"
 
         lo, hi = BREEDS[breed_key][index_name]
         breed_ru = format_breed_ru(breed_key, short=True)
         span = max(1e-6, hi - lo)
+
+        # Свободноспаренная: расширить границы на 15%
+        mating = getattr(self, 'mating_mode', 'purebred')
+        if mating == 'free_mated':
+            expansion = 0.15 * span
+            lo -= expansion
+            hi += expansion
+            span = max(1e-6, hi - lo)
+
         margin_inner = 0.08 * span
         margin_outer = 0.18 * span
 
         range_str = f"{lo:.2f}…{hi:.2f}{unit}" if index_name != "HI" else f"{lo:.3f}…{hi:.3f}"
+        mode_hint = " (свободн.)" if mating == 'free_mated' else ""
 
         if (lo + margin_inner) <= val <= (hi - margin_inner):
-            return f"В уверенном стандарте породы {breed_ru} (норма {range_str})", "good"
+            return f"В уверенном стандарте породы {breed_ru}{mode_hint} (норма {range_str})", "good"
         if lo <= val <= hi:
-            return f"Укладывается в границы породы {breed_ru} (норма {range_str}, ближе к краю диапазона)", "good"
+            return f"Укладывается в границы породы {breed_ru}{mode_hint} (норма {range_str}, ближе к краю диапазона)", "good"
         if (lo - margin_outer) <= val <= (hi + margin_outer):
-            return f"Небольшое отклонение от стандарта {breed_ru} (норма {range_str}) — возможна лёгкая примесь", "warn"
-        return f"Выходит за пределы стандарта породы {breed_ru} (норма {range_str})", "bad"
+            return f"Небольшое отклонение от стандарта {breed_ru}{mode_hint} (норма {range_str}) — возможна лёгкая примесь", "warn"
+        return f"Выходит за пределы стандарта породы {breed_ru}{mode_hint} (норма {range_str})", "bad"
 
     def update_data(self, image_data, target_breed: str = None):
         """Алиас для update_interpretation."""

@@ -461,3 +461,77 @@ def analyze_colony(
     return ColonyAnalysisService.analyze_image(
         wings_or_image, target_breed=target_breed, reanalyze_wings=reanalyze_wings
     )
+
+
+def find_best_bees(
+    wings: List[Wing],
+    peak_width: int = 1,
+) -> List[int]:
+    """Определить «лучших пчёл» семьи по алгоритму Карташёва (Лучшая пчела.xlsm).
+
+    Тройная фильтрация по пикам графиков CI → DsA → HI:
+    1) Все крылья сортируются по CI, выделяется группа класса с максимальным числом крыльев (±peak_width классов).
+    2) Из выделенных крыльев — аналогичная фильтрация по DsA.
+    3) Из оставшихся — фильтрация по HI.
+    Возвращает список индексов крыльев (0-based), прошедших все три фильтра.
+
+    Args:
+        wings: Список крыльев семьи (Wing).
+        peak_width: Ширина пика (1 = один класс, 2 = два соседних, 3 = три).
+    Returns:
+        Список 0-based индексов «лучших» крыльев.
+    """
+    if not wings:
+        return []
+
+    # Собираем валидные крылья с индексами
+    entries = []
+    for idx, w in enumerate(wings):
+        if not getattr(w, 'is_enabled', True):
+            continue
+        if not (w.analysis and w.analysis.is_valid and w.analysis.CI > 0 and w.analysis.HI > 0):
+            continue
+        entries.append((idx, float(w.analysis.CI), float(w.analysis.DsA), float(w.analysis.HI)))
+
+    if not entries:
+        return []
+
+    def _filter_by_peak(items, value_idx, peak_w):
+        """Фильтровать по пику: найти класс с максимальным числом значений."""
+        if not items:
+            return items
+        vals = [it[value_idx] for it in items]
+        v_min, v_max = min(vals), max(vals)
+        if v_max - v_min < 1e-9:
+            return items  # все одинаковые
+        # 31 класс (как у Карташёва)
+        n_classes = 31
+        bin_width = (v_max - v_min) / n_classes
+        if bin_width < 1e-12:
+            return items
+
+        # Распределяем по классам
+        class_counts = [0] * n_classes
+        class_members = [[] for _ in range(n_classes)]
+        for it in items:
+            v = it[value_idx]
+            c = min(int((v - v_min) / bin_width), n_classes - 1)
+            class_counts[c] += 1
+            class_members[c].append(it)
+
+        # Находим класс-пик
+        peak_class = max(range(n_classes), key=lambda c: class_counts[c])
+
+        # Собираем крылья из пика ± peak_width
+        half = peak_w - 1  # peak_width=1 → только пик, 2 → пик+1, 3 → пик±1
+        result = []
+        for c in range(max(0, peak_class - half), min(n_classes, peak_class + half + 1)):
+            result.extend(class_members[c])
+        return result if result else items
+
+    # Тройная фильтрация
+    step1 = _filter_by_peak(entries, 1, peak_width)   # по CI
+    step2 = _filter_by_peak(step1, 2, peak_width)     # по DsA
+    step3 = _filter_by_peak(step2, 3, peak_width)     # по HI
+
+    return sorted([it[0] for it in step3])

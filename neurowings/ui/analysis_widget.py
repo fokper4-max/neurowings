@@ -65,6 +65,11 @@ class AnalysisWidget(QWidget):
         self.btn_export.clicked.connect(self._export_to_excel)
         header.addWidget(self.btn_export)
 
+        self.btn_best_bees = QPushButton("🏆 Лучшие пчёлы")
+        self.btn_best_bees.setToolTip("Выделить крылья, наиболее соответствующие породе (тройная фильтрация по CI→DsA→HI)")
+        self.btn_best_bees.clicked.connect(self._highlight_best_bees)
+        header.addWidget(self.btn_best_bees)
+
         main_layout.addLayout(header)
 
         self.analysis_table = QTableWidget()
@@ -409,6 +414,34 @@ class AnalysisWidget(QWidget):
             QMessageBox.information(self, "PDF-Паспорт готов", f"PDF-Паспорт пчелосемьи успешно сохранён:\n{path}")
         except Exception as exc:
             QMessageBox.critical(self, "Ошибка создания PDF", str(exc))
+
+    def _highlight_best_bees(self):
+        """Подсветить «лучших пчёл» семьи в таблице результатов (тройная фильтрация CI→DsA→HI)."""
+        if not self.current_data or not self.current_data.wings:
+            QMessageBox.information(self, "Лучшие пчёлы", "Нет данных для анализа.")
+            return
+        from ..core.colony_analysis import find_best_bees
+        best = find_best_bees(self.current_data.wings, peak_width=1)
+        if not best:
+            QMessageBox.information(self, "Лучшие пчёлы", "Не удалось определить лучших пчёл (мало данных).")
+            return
+        # Подсветить строки в results_table
+        gold = QColor(255, 215, 0, 80)  # золотистый фон
+        normal = QColor(255, 255, 255)
+        for row in range(self.results_table.rowCount()):
+            bg = gold if row in best else normal
+            for col in range(self.results_table.columnCount()):
+                item = self.results_table.item(row, col)
+                if item:
+                    item.setBackground(bg)
+        best_nums = [str(i + 1) for i in best]
+        QMessageBox.information(
+            self, "🏆 Лучшие пчёлы семьи",
+            f"Наиболее породные крылья (тройная фильтрация CI→DsA→HI):\n\n"
+            f"Крылья №: {', '.join(best_nums)}\n"
+            f"Всего: {len(best)} из {self.results_table.rowCount()}\n\n"
+            f"Они выделены золотистым цветом в таблице."
+        )
 
     def _export_to_excel(self):
         """Export the displayed analysis without changing the project or TPS."""
