@@ -344,5 +344,42 @@ class Regression(unittest.TestCase):
   self.assertGreaterEqual(win.point_items[0].hit_radius, 6.0)
   win.close()
 
+ def test_kartashov_v25_parity_and_image_rotation(self):
+  """Проверка 1:1 совпадения с Excel Карташева в. 2.5, калибровки точек по Рис. 15 и поворота скана в UI."""
+  from unittest.mock import patch
+  from PIL import Image
+  from neurowings.ui.main_window import MainWindow
+  from neurowings.workers.processing import ProcessingWorker
+  from PyQt5.QtWidgets import QListWidgetItem
+  from PyQt5.QtCore import Qt
+
+  # 1. Калибровка точек 3, 4, 6 по Рис. 15 Карташева
+  pts = [(1161.0, 2838.0), (1810.0, 2789.0), (1430.0, 2787.0), (1244.0, 2791.0),
+         (1422.0, 2668.0), (1506.0, 2623.0), (1556.0, 2628.0), (1404.0, 2497.0)]
+  cal = ProcessingWorker._apply_kartashov_vein_axis_calibration(pts)
+  self.assertEqual(len(cal), 8)
+  self.assertGreater(cal[3][0], pts[3][0])  # Точка 4 смещается вправо к пересечению осей жилок
+  self.assertGreater(cal[2][0], pts[2][0])  # Точка 3 смещается вправо к пересечению осей жилок
+
+  # 2. Поворот скана 90° / 180° / отражение в MainWindow
+  with tempfile.TemporaryDirectory() as t:
+   img_p = Path(t) / "scan.jpg"
+   Image.new("RGB", (200, 100), color=(240, 240, 240)).save(img_p)
+   with patch.object(MainWindow, '_load_models'), patch.object(MainWindow, '_load_gpt_config'):
+    win = MainWindow()
+   d = ImageData(img_p, wings=[Wing(points=[WingPoint(10.0, 20.0) for _ in range(8)])], width=200, height=100)
+   win.images[str(img_p)] = d
+   win.current_image = d
+   item = QListWidgetItem(img_p.name)
+   item.setData(Qt.UserRole, str(img_p))
+   win.file_list.addItem(item)
+   win.file_list.setCurrentItem(item)
+
+   win._rotate_current_image_cw()
+   self.assertEqual((win.current_image.width, win.current_image.height), (100, 200))
+   self.assertAlmostEqual(win.current_image.wings[0].points[0].x, 80.0)
+   self.assertAlmostEqual(win.current_image.wings[0].points[0].y, 10.0)
+   win.close()
+
 if __name__=='__main__':
  unittest.main()

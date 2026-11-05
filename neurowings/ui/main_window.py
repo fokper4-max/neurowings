@@ -493,6 +493,10 @@ class MainWindow(QMainWindow):
         edit_menu.addAction("Отменить изменение", self._undo_edit, "Ctrl+Z")
         edit_menu.addAction("Сбросить точки выбранного крыла", self._reset_selected_wing)
         edit_menu.addAction("Удалить крыло", self._delete_selected_wing, "Delete")
+        edit_menu.addSeparator()
+        edit_menu.addAction("🔄 Повернуть скан на 90° вправо", self._rotate_current_image_cw, "Ctrl+R")
+        edit_menu.addAction("🔄 Повернуть скан на 180°", self._rotate_current_image_180)
+        edit_menu.addAction("↔ Отразить скан по горизонтали", self._flip_current_image_h)
 
         view_menu = menubar.addMenu("Вид")
         view_menu.addAction("Увеличить", lambda: self._zoom(1.25))
@@ -554,6 +558,12 @@ class MainWindow(QMainWindow):
         toolbar.addSeparator()
         toolbar.addAction("🔍+", lambda: self._zoom(1.25))
         toolbar.addAction("🔍-", lambda: self._zoom(0.8))
+        act_rot90 = toolbar.addAction("🔄 90°", self._rotate_current_image_cw)
+        act_rot90.setToolTip("Повернуть текущий скан на 90° по часовой стрелке (Ctrl+R)")
+        act_rot180 = toolbar.addAction("🔄 180°", self._rotate_current_image_180)
+        act_rot180.setToolTip("Развернуть текущий скан на 180° (если крылья отсканированы вверх ногами или влево)")
+        act_flip = toolbar.addAction("↔ Отразить", self._flip_current_image_h)
+        act_flip.setToolTip("Зеркально отразить текущий скан по горизонтали")
 
         toolbar.addSeparator()
         toolbar.addAction("⚡ Обработать", self._process_smart)
@@ -1144,6 +1154,86 @@ class MainWindow(QMainWindow):
 
         self._update_analysis_widget()
         self._update_interpretation_widgets()
+
+    def _transform_current_image_orientation(self, mode: str):
+        """
+        Повернуть или отразить текущий файл изображения на диске (с пересчётом координат точек и рамок).
+        mode: 'cw90' (90° по часовой), 'rot180' (180°), 'fliph' (зеркально по горизонтали).
+        """
+        if not self.current_image or not self.current_image.path:
+            self.statusBar().showMessage("Сначала откройте и выберите изображение в списке слева")
+            return
+        img_path = Path(self.current_image.path)
+        if not img_path.exists():
+            return
+
+        try:
+            from PIL import Image, ImageOps
+            import tempfile
+
+            with Image.open(img_path) as im:
+                im = ImageOps.exif_transpose(im)
+                old_w, old_h = im.size
+                if mode == "cw90":
+                    im_out = im.transpose(Image.Transpose.ROTATE_270)
+                    label_ru = "повёрнуто на 90° вправо"
+                elif mode == "rot180":
+                    im_out = im.transpose(Image.Transpose.ROTATE_180)
+                    label_ru = "развёрнуто на 180°"
+                elif mode == "fliph":
+                    im_out = im.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
+                    label_ru = "отражено по горизонтали"
+                else:
+                    return
+
+                suffix = img_path.suffix or ".jpg"
+                fd, tmp_path = tempfile.mkstemp(prefix=img_path.name + ".", suffix=suffix, dir=img_path.parent)
+                os.close(fd)
+                try:
+                    save_kwargs = {"quality": 95} if suffix.lower() in (".jpg", ".jpeg") else {}
+                    im_out.save(tmp_path, **save_kwargs)
+                    os.replace(tmp_path, img_path)
+                finally:
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+
+            def _map_xy(x: float, y: float):
+                if mode == "cw90":
+                    return float(old_h - y), float(x)
+                if mode == "rot180":
+                    return float(old_w - x), float(old_h - y)
+                return float(old_w - x), float(y)
+
+            for wing in self.current_image.wings:
+                for attr in ("points", "points_yolo", "points_stage1", "points_stage2", "points_gt"):
+                    pts_list = getattr(wing, attr, None)
+                    if pts_list:
+                        for pt in pts_list:
+                            pt.x, pt.y = _map_xy(pt.x, pt.y)
+                if wing.bbox is not None:
+                    bx1, by1 = _map_xy(wing.bbox.x1, wing.bbox.y1)
+                    bx2, by2 = _map_xy(wing.bbox.x2, wing.bbox.y2)
+                    wing.bbox.x1 = min(bx1, bx2)
+                    wing.bbox.y1 = min(by1, by2)
+                    wing.bbox.x2 = max(bx1, bx2)
+                    wing.bbox.y2 = max(by1, by2)
+
+            self.current_image.is_modified = True
+            self._load_current_image()
+            self.statusBar().showMessage(
+                f"Изображение {img_path.name} {label_ru}. Нажмите «⚡ Обработать» для распознавания крыльев."
+            )
+        except Exception as exc:
+            QMessageBox.warning(self, "Поворот изображения", f"Не удалось повернуть изображение:\n{exc}")
+
+    def _rotate_current_image_cw(self):
+        self._transform_current_image_orientation("cw90")
+
+    def _rotate_current_image_180(self):
+        self._transform_current_image_orientation("rot180")
+
+    def _flip_current_image_h(self):
+        self._transform_current_image_orientation("fliph")
 
     def _prev_file(self):
         """Предыдущий файл"""

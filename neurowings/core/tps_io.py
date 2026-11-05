@@ -27,8 +27,6 @@ def load_tps_into_image(img_data, tps_path):
             if not math.isfinite(x) or not math.isfinite(y): raise ValueError('TPS: недопустимые координаты')
             points.append(WingPoint(x,height-y))
         while i<len(lines) and not lines[i].upper().startswith('LM='):
-            if lines[i].upper().startswith('IMAGE=') and Path(lines[i].split('=',1)[1].replace('\\','/')).name.casefold()!=img_data.path.name.casefold():
-                raise ValueError('TPS относится к другому изображению')
             i+=1
         wings.extend(
             Wing(

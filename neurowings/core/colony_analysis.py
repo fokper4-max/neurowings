@@ -144,7 +144,10 @@ def _compute_index_stats(values: List[float], abs_mean_for_cv: bool = True) -> I
     std = float(np.std(clean, ddof=1)) if len(clean) > 1 else 0.0
     sem = float(std / math.sqrt(len(clean))) if clean else 0.0
     denom = abs(mean) if abs_mean_for_cv else mean
-    cv = float(abs(100.0 * std / denom)) if denom != 0 else 0.0
+    # В Excel (Карташев в. 2.5, лист «Индексы» строки 103–104):
+    # СКО = ROUND(STDEV(...), 3), Квар = ROUND(СКО / МО, 3) * 100%
+    std_rounded = round(std, 3)
+    cv = float(round(abs(std_rounded / denom), 3) * 100.0) if denom != 0 else 0.0
     return IndexStats(
         values=clean,
         mean=mean,
@@ -248,7 +251,19 @@ class ColonyAnalysisService:
         res.valid_count = len(valid_numbers)
         res.wing_numbers_valid = valid_numbers
 
-        res.identified = sum(1 for _, w in active_entries if w.analysis and w.analysis.is_identified)
+        # В эталонной программе Карташева (в. 2.5) идентифицированными считаются крылья,
+        # попавшие хотя бы в одну из 4 классических пород Руттнера (CLASSIC_BREEDS).
+        # Если пользователь явно выбрал региональный экотип (Carpatica/Ukrainian/FarEast)
+        # или ни одно крыло не попало в CLASSIC_BREEDS, учитываем расширенный справочник.
+        classic_identified = sum(
+            1 for _, w in active_entries
+            if w.analysis and w.analysis.breeds and any(b in CLASSIC_BREEDS for b in w.analysis.breeds)
+        )
+        all_identified = sum(1 for _, w in active_entries if w.analysis and w.analysis.is_identified)
+        if target_breed and target_breed not in ("auto",) and target_breed not in CLASSIC_BREEDS:
+            res.identified = all_identified
+        else:
+            res.identified = classic_identified if classic_identified > 0 else all_identified
         res.not_identified = res.total - res.identified
         res.id_wings_pct = 100.0 * res.identified / res.total if res.total > 0 else 0.0
         res.not_id_pct = 100.0 * res.not_identified / res.total if res.total > 0 else 0.0
@@ -337,8 +352,9 @@ class ColonyAnalysisService:
                 else:
                     res.wings_out_of_eval_breed.append(wing_num)
 
-        # 1. Штраф за неидентифицированные крылья
-        res.penalty_not_id = -int(math.ceil(res.not_id_pct / 5.0)) if res.total > 0 else 0
+        # 1. Штраф за неидентифицированные крылья:
+        # В Excel Карташева (лист «Анализ» строка 4): «За каждые 5% (после округления) начисляется "-1"»
+        res.penalty_not_id = -int(math.floor(res.not_id_pct / 5.0 + 0.5)) if res.total > 0 else 0
 
         # 2. Вероятностная оценка и баллы (0..5)
         if res.eval_breed and res.eval_breed in breed_probabilities:
@@ -355,7 +371,7 @@ class ColonyAnalysisService:
         elif res.ci.cv < 12.5:
             res.ci_integrity = "идеальная"
             res.ci_score = 2
-        elif res.ci.cv < 20.0:
+        elif res.ci.cv <= 20.0:
             res.ci_integrity = "нормальная"
             res.ci_score = 1
         else:
@@ -377,7 +393,7 @@ class ColonyAnalysisService:
         elif res.hi.cv < 6.5:
             res.hi_integrity = "идеальная"
             res.hi_score = 2
-        elif res.hi.cv < 7.5:
+        elif res.hi.cv <= 7.5:
             res.hi_integrity = "нормальная"
             res.hi_score = 1
         else:

@@ -379,76 +379,147 @@ def calculate_breed_probability(
     return float(inter_vol / fam_vol)
 
 
+# Стандартные границы классов гистограмм листа «Графики» программы В.А. Карташева
+# «Порода по крыльям» в. 2.5_16.11.22.xls (Руттнер для КИ, Крубер для ДС и ГИ)
+KARTASHOV_CI_BOUNDS: Tuple[float, ...] = (
+    0.71, 0.76, 0.81, 0.87, 0.93, 1.00, 1.07, 1.14, 1.22, 1.31,
+    1.40, 1.50, 1.61, 1.73, 1.86, 2.00, 2.16, 2.33, 2.53, 2.75,
+    3.00, 3.29, 3.62, 4.00, 4.45, 5.00, 5.67, 6.50, 7.57, 9.00, 10.50,
+)
+KARTASHOV_DSA_BOUNDS: Tuple[float, ...] = (
+    -16.29, -15.31, -14.33, -13.36, -12.39, -11.42, -10.46, -9.50, -8.54, -7.59,
+    -6.63, -5.68, -4.73, -3.78, -2.84, -1.89, -0.95, 0.00, 0.95, 1.89,
+    2.84, 3.78, 4.73, 5.68, 6.63, 7.59, 8.54, 9.50, 10.46, 11.42, 12.39,
+)
+KARTASHOV_HI_BOUNDS: Tuple[float, ...] = (
+    0.600, 0.616, 0.630, 0.648, 0.666, 0.685, 0.704, 0.724, 0.744, 0.765,
+    0.786, 0.807, 0.829, 0.852, 0.875, 0.899, 0.923, 0.948, 0.974, 1.000,
+    1.027, 1.053, 1.083, 1.113, 1.143, 1.174, 1.206, 1.239, 1.272, 1.308,
+    1.344, 1.381, 1.420,
+)
+
+# Индексы 0-based строк листа «Графики» для критических областей 1-го и 2-го ранга
+# (строго 1:1 по формулам листа «Анализ» R26..R58 программы Карташева в. 2.5)
+_KARTASHOV_HYB_SLICES = {
+    "CI": {
+        "Mellifera": (set(range(16, 19)), set(range(19, 31))),
+        "Caucasica": (set(range(19, 22)) | set(range(12, 15)), set(range(22, 31)) | set(range(0, 12))),
+        "Ligustica": (set(range(21, 24)) | set(range(14, 17)), set(range(24, 31)) | set(range(0, 14))),
+        "Carnica":   (set(range(15, 18)), set(range(0, 15))),
+    },
+    "DsA": {
+        "Mellifera": (set(range(18, 21)), set(range(21, 31))),
+        "Caucasica": (set(range(21, 24)) | set(range(11, 14)), set(range(24, 31)) | set(range(0, 11))),
+        "Ligustica": (set(range(23, 26)) | set(range(15, 18)), set(range(26, 31)) | set(range(0, 15))),
+        "Carnica":   (set(range(15, 18)), set(range(0, 15))),
+    },
+    "HI": {
+        "Mellifera": (set(range(17, 20)), set(range(20, 33))),
+        "Caucasica": (set(range(21, 24)) | set(range(4, 7)), set(range(24, 33)) | set(range(0, 4))),
+        "Ligustica": (set(range(27, 30)) | set(range(14, 17)), set(range(30, 33)) | set(range(0, 14))),
+        "Carnica":   (set(range(14, 17)), set(range(0, 14))),
+    },
+}
+
+
 def calculate_hybridization_score(
     values: List[float],
     breed_name: str,
     index_type: str
 ) -> int:
     """
-    Рассчитать баллы за гибридизацию по алгоритму Excel.
+    Рассчитать баллы за гибридизацию строго 1:1 по алгоритму В.А. Карташева
+    («Порода по крыльям» в. 2.5_16.11.22.xls, листы «Графики» и «Анализ»).
 
-    Excel алгоритм:
-    1. Определяет границы преобладающей породы (например, для Mellifera CI: 0.76-2.16)
-    2. Строит гистограмму распределения значений
-    3. Находит, в каком классе гистограммы находится граница породы
-    4. Считает крылья в двух рангах:
-       - 2-й ранг: крылья ДАЛЬШЕ 3 классов от границы (явные гибриды)
-       - 1-й ранг: крылья в пределах 3 классов от границы (подозрительные)
-    5. Определяет степень гибридизации по процентам:
-       - > 2% во 2-м ИЛИ > 15% в 1-м → ГИБРИД (0 баллов)
-       - > 1% во 2-м ИЛИ > 7.5% в 1-м → Допустимая (1 балл)
-       - > 0% во 2-м ИЛИ > 0% в 1-м → Несущественная (2 балла)
-       - Оба = 0% → Отсутствует (3 балла)
-
-    Args:
-        values: Список значений индекса (CI, DsA или HI)
-        breed_name: Название преобладающей породы
-        index_type: Тип индекса ('CI', 'DsA', 'HI')
-
-    Returns:
-        Баллы: 0-3
+    Использует фиксированные шкалы классов Руттнера (CI) и Крубера (DsA, HI)
+    и точные диапазоны критических областей 1-го ранга (допускается <= 15%)
+    и 2-го ранга (допускается <= 2%).
     """
     from .constants import BREED_RANGES
 
     if not values or breed_name not in BREED_RANGES:
         return 0
 
-    # Получаем границы породы для данного индекса
     breed_range = BREED_RANGES[breed_name][index_type]
     breed_min, breed_max = breed_range
 
-    # Фильтруем валидные значения
     valid_values = [float(v) for v in values if v is not None and math.isfinite(float(v))]
     if not valid_values:
         return 0
 
     total_wings = len(valid_values)
-
-    # Создаём гистограмму (30 классов, как в Excel на листе "Графики")
-    # Excel использует равные интервалы от min до max значений
-    min_val = min(valid_values)
-    max_val = max(valid_values)
-
-    # Если все значения одинаковые - нет гибридизации
-    if abs(max_val - min_val) < 1e-10:
-        return 3 if breed_min <= min_val <= breed_max else 0
-
-    num_bins = 30
-    bin_width = (max_val - min_val) / num_bins
-
-    rank1 = rank2 = 0
-    for value in valid_values:
-        distance = max(breed_min - value, value - breed_max, 0)
-        if distance > 3 * bin_width:
-            rank2 += 1
-        elif distance > 0:
-            rank1 += 1
-    pct_rank2 = 100 * rank2 / total_wings
-    pct_rank1 = 100 * rank1 / total_wings
-    if pct_rank2 > 2 or pct_rank1 > 15:
+    bounds_map = {
+        "CI": KARTASHOV_CI_BOUNDS,
+        "DsA": KARTASHOV_DSA_BOUNDS,
+        "HI": KARTASHOV_HI_BOUNDS,
+    }
+    bounds = bounds_map.get(index_type)
+    if not bounds:
         return 0
-    if pct_rank2 > 1 or pct_rank1 > 7.5:
+
+    # Определяем класс каждого крыла по таблице «Графики»
+    counts = [0] * len(bounds)
+    out_of_bounds_hybrid = 0
+    for v in valid_values:
+        placed = False
+        for i, b in enumerate(bounds):
+            if v <= b:
+                counts[i] += 1
+                placed = True
+                break
+        if not placed:
+            # Значение правее последнего класса таблицы
+            if v > breed_max:
+                out_of_bounds_hybrid += 1
+            else:
+                counts[-1] += 1
+
+    slices_for_index = _KARTASHOV_HYB_SLICES.get(index_type, {})
+    if breed_name in slices_for_index:
+        rank1_bins, rank2_bins = slices_for_index[breed_name]
+        rank1 = sum(counts[i] for i in rank1_bins if 0 <= i < len(counts))
+        rank2 = sum(counts[i] for i in rank2_bins if 0 <= i < len(counts)) + out_of_bounds_hybrid
+        # Если все значения экстремально вышли за нижнюю границу первой породы (напр. CI < 0.71)
+        if breed_name == "Mellifera":
+            for v in valid_values:
+                if v < breed_min:
+                    rank2 += 1
+    else:
+        # Для дополнительных пород (Carpatica, Ukrainian, FarEast) — отсчёт 3 классов от границ породы
+        min_idx = 0
+        for i, b in enumerate(bounds):
+            if b >= breed_min - 1e-9:
+                min_idx = i
+                break
+        max_idx = len(bounds) - 1
+        for i, b in enumerate(bounds):
+            if b >= breed_max - 1e-9:
+                max_idx = i
+                break
+        rank1 = 0
+        rank2 = out_of_bounds_hybrid
+        for i, c in enumerate(counts):
+            if c == 0:
+                continue
+            if i < min_idx:
+                dist = min_idx - i
+                if dist <= 3:
+                    rank1 += c
+                else:
+                    rank2 += c
+            elif i > max_idx:
+                dist = i - max_idx
+                if dist <= 3:
+                    rank1 += c
+                else:
+                    rank2 += c
+
+    pct_rank2 = 100.0 * rank2 / total_wings
+    pct_rank1 = 100.0 * rank1 / total_wings
+    if pct_rank2 > 2.0 or pct_rank1 > 15.0:
+        return 0
+    if pct_rank2 > 1.0 or pct_rank1 > 7.5:
         return 1
-    if pct_rank2 > 0 or pct_rank1 > 0:
+    if pct_rank2 > 0.0 or pct_rank1 > 0.0:
         return 2
     return 3

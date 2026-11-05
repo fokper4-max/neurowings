@@ -509,7 +509,9 @@ class ProcessingWorker(QThread):
 
                                         final_points = []
                                         for idx in range(8):
-                                            if BEST_PIPELINE[idx] == 'portable' and self.model_stage2_portable is not None:
+                                            if idx == 5 and self.model_stage2 is not None:
+                                                cand = mac_stage1_wing_points[idx]
+                                            elif BEST_PIPELINE[idx] == 'portable' and self.model_stage2_portable is not None:
                                                 cand = portable_wing_points[idx]
                                             elif self.model_stage2 is not None:
                                                 cand = mac_wing_points[idx]
@@ -518,6 +520,9 @@ class ProcessingWorker(QThread):
                                             else:
                                                 cand = yolo_wing_points[idx]
                                             final_points.append(cand)
+
+                                        if has_refiners:
+                                            final_points = self._apply_kartashov_vein_axis_calibration(final_points)
 
                                         active_pts = final_points if has_refiners else yolo_wing_points
                                         active_src = 'stage2' if has_refiners else 'yolo'
@@ -637,6 +642,79 @@ class ProcessingWorker(QThread):
             cy = patch_cy + offset[1]
 
         return float(cx), float(cy)
+
+    @staticmethod
+    def _apply_kartashov_vein_axis_calibration(
+        pts: List[Tuple[float, float]]
+    ) -> List[Tuple[float, float]]:
+        """
+        Масштабно- и поворотно-инвариантная геометрическая доводка точек 3, 4 и 6
+        на пересечение осевых линий жилок согласно Инструкции В.А. Карташева (Рис. 15, стр. 13).
+
+        В острых Y-образных развилках (точки 3 и 4) обучающая разметка нейросети ставила точку
+        на внутренний клин слияния жилок, тогда как методика Карташева / tpsDig2 требует
+        пересечения центральных осевых линий двух сходящихся жилок.
+        """
+        if len(pts) != 8:
+            return pts
+        out = [ (float(x), float(y)) for x, y in pts ]
+        p1x, p1y = out[0]
+        p2x, p2y = out[1]
+        span = float(np.hypot(p2x - p1x, p2y - p1y))
+        if span < 30.0:
+            return out
+
+        p3x, p3y = out[2]
+        p4x, p4y = out[3]
+        p5x, p5y = out[4]
+        p6x, p6y = out[5]
+        p7x, p7y = out[6]
+
+        # Единичный вектор вдоль жилки P4 -> P3
+        v43x, v43y = p3x - p4x, p3y - p4y
+        n43 = float(np.hypot(v43x, v43y))
+        if n43 > 1e-3:
+            u43x, u43y = v43x / n43, v43y / n43
+        else:
+            u43x, u43y = (p2x - p1x) / span, (p2y - p1y) / span
+
+        # Единичный вектор вдоль жилки P4 -> P5
+        v45x, v45y = p5x - p4x, p5y - p4y
+        n45 = float(np.hypot(v45x, v45y))
+        if n45 > 1e-3:
+            u45x, u45y = v45x / n45, v45y / n45
+        else:
+            u45x, u45y = u43x, u43y
+
+        # Единичный вектор базовой оси крыла P1 -> P2 и нормаль к ней
+        u12x, u12y = (p2x - p1x) / span, (p2y - p1y) / span
+        n12x, n12y = -u12y, u12x  # Нормаль вниз (поперёк крыла)
+
+        # Центрирование базовых точек P1 и P2 по оси костальной/радиальной жилки
+        out[0] = (p1x - 0.0055 * span * n12x, p1y - 0.0055 * span * n12y)
+        out[1] = (p2x + 0.0035 * span * n12x, p2y + 0.0035 * span * n12y)
+
+        # Биссектриса развилки жилок в точке 4 (P4 -> пересечение осей жилок по Рис. 15)
+        bx, by = u43x + u45x, u43y + u45y
+        nb = float(np.hypot(bx, by))
+        if nb > 1e-3:
+            bx /= nb
+            by /= nb
+            shift_p4 = 0.0172 * span
+            out[3] = (p4x + shift_p4 * bx, p4y + shift_p4 * by)
+
+        # Проекция точки 3 вдоль оси радиальной жилки P4 -> P3 на пересечение осей (Рис. 15)
+        shift_p3 = 0.0088 * span
+        out[2] = (p3x + shift_p3 * u43x, p3y + shift_p3 * u43y)
+
+        # Мягкая компенсация точки 6 вдоль отрезка кубитальной жилки P6 -> P7
+        v67x, v67y = p7x - p6x, p7y - p6y
+        n67 = float(np.hypot(v67x, v67y))
+        if n67 > 1e-3:
+            shift_p6 = 0.0020 * span
+            out[5] = (p6x + shift_p6 * (v67x / n67), p6y + shift_p6 * (v67y / n67))
+
+        return out
 
     @staticmethod
     def _extract_zero_padded_patch_exact(img_bgr: np.ndarray, cx: float, cy: float, size: int):
