@@ -227,20 +227,42 @@ class Regression(unittest.TestCase):
    self.assertGreater(out.stat().st_size, 5000)
 
  def test_graphs_widget_2d_breed_map(self):
-  """Проверка 2D-карты пород в GraphsWidget (наличие отрисованного QPixmap)."""
+  """Проверка 2D-карты пород и всех 3 вариантов визуала графиков в GraphsWidget (включая Карташёв в. 2.5)."""
   from neurowings.ui.graphs_widget import GraphsWidget
   gw = GraphsWidget()
   wings = [
    self._make_analyzed_wing(1.65, -3.0, 0.82),
    self._make_analyzed_wing(2.55, 2.2, 0.85),
+   self._make_analyzed_wing(2.48, 1.9, 0.96),
   ]
-  gw.update_graphs([1.65, 2.55], [-3.0, 2.2], [0.82, 0.85], wings=wings)
-  self.assertIsNotNone(gw.graph_map_2d._pixmap)
-  self.assertFalse(gw.graph_map_2d._pixmap.isNull())
-  # Переключение режима 2D-карты
-  gw.combo_2d_mode.setCurrentIndex(1)
-  self.assertIsNotNone(gw.graph_map_2d._pixmap)
-  self.assertFalse(gw.graph_map_2d._pixmap.isNull())
+  # По умолчанию выбран 3-й вариант (индекс 2: Как в Excel «Порода по крыльям» Карташёва в. 2.5)
+  self.assertEqual(gw.combo_chart_style.currentIndex(), 2)
+  gw.update_graphs([1.65, 2.55, 2.48], [-3.0, 2.2, 1.9], [0.82, 0.85, 0.96], wing_numbers=[1, 2, 3], wings=wings)
+  for lbl in (gw.graph_map_2d, gw.graph_ci, gw.graph_dsa, gw.graph_hi):
+   self.assertIsNotNone(lbl._pixmap)
+   self.assertFalse(lbl._pixmap.isNull())
+
+  # Проверяем переключение всех 3 вариантов визуала (0: классика, 1: гистограмма + KDE, 2: Excel Карташёва)
+  for style_idx in (0, 1, 2):
+   gw.combo_chart_style.setCurrentIndex(style_idx)
+   for lbl in (gw.graph_ci, gw.graph_dsa, gw.graph_hi):
+    self.assertIsNotNone(lbl._pixmap)
+    self.assertFalse(lbl._pixmap.isNull())
+
+  # Проверяем выбор целевой породы для границ («Mellifera», «Carnica»)
+  gw.set_target_breed("Mellifera")
+  self.assertFalse(gw.graph_ci._pixmap.isNull())
+  gw.set_target_breed("Carnica")
+  self.assertFalse(gw.graph_ci._pixmap.isNull())
+
+  # Переключение всех режимов верхней 2D-карты (0, 1, 2, 3)
+  for mode_idx in (1, 2, 0):
+   gw.combo_2d_mode.setCurrentIndex(mode_idx)
+   self.assertFalse(gw.graph_map_2d.isHidden())
+   self.assertIsNotNone(gw.graph_map_2d._pixmap)
+   self.assertFalse(gw.graph_map_2d._pixmap.isNull())
+  gw.combo_2d_mode.setCurrentIndex(3)
+  self.assertTrue(gw.graph_map_2d.isHidden())
 
  def test_points_gt_preserved_on_point_moved(self):
   """Сохранение эталонных точек points_gt при ручном сдвиге точки через _on_point_moved."""
