@@ -78,6 +78,7 @@ class InterpretationWidget(QWidget):
         self._current_data = None
         self._last_result = None
         self.target_breed = "auto"
+        self.mating_mode = "purebred"
         self._setup_ui()
 
     def _setup_ui(self):
@@ -242,7 +243,12 @@ class InterpretationWidget(QWidget):
             self.text_edit.setText("Нет данных для интерпретации")
             return
 
-        res = analyze_colony(wings, target_breed=self.target_breed, reanalyze_wings=False)
+        res = analyze_colony(
+            wings,
+            target_breed=self.target_breed,
+            reanalyze_wings=False,
+            mating_mode=self.mating_mode,
+        )
         self._last_result = res
 
         if not res.ci.values:

@@ -417,29 +417,49 @@ class AnalysisWidget(QWidget):
 
     def _highlight_best_bees(self):
         """Подсветить «лучших пчёл» семьи в таблице результатов (тройная фильтрация CI→DsA→HI)."""
-        if not self.current_data or not self.current_data.wings:
+        wings = self.current_data if self.aggregate_mode else getattr(self.current_data, "wings", None)
+        if not wings:
             QMessageBox.information(self, "Лучшие пчёлы", "Нет данных для анализа.")
             return
         from ..core.colony_analysis import find_best_bees
-        best = find_best_bees(self.current_data.wings, peak_width=1)
+        best = find_best_bees(wings, peak_width=2)
         if not best:
             QMessageBox.information(self, "Лучшие пчёлы", "Не удалось определить лучших пчёл (мало данных).")
             return
-        # Подсветить строки в results_table
-        gold = QColor(255, 215, 0, 80)  # золотистый фон
-        normal = QColor(255, 255, 255)
-        for row in range(self.results_table.rowCount()):
-            bg = gold if row in best else normal
-            for col in range(self.results_table.columnCount()):
-                item = self.results_table.item(row, col)
-                if item:
-                    item.setBackground(bg)
+        # Подсветить строки в results_table, сохраняя статусную заливку остальных строк
+        gold = QColor("#fff3bf")  # золотистый фон
+        if not self.aggregate_mode:
+            best_set = set(best)
+            for row in range(min(self.results_table.rowCount(), len(wings))):
+                wing = wings[row]
+                enabled = getattr(wing, "is_enabled", True)
+                a = wing.analysis
+                if row in best_set:
+                    bg = gold
+                elif not enabled:
+                    bg = QColor("#f1f3f5")
+                elif a and a.is_identified:
+                    bg = QColor("#e8f5e9")
+                else:
+                    bg = QColor("#ffebee")
+                for col in range(self.results_table.columnCount()):
+                    item = self.results_table.item(row, col)
+                    if item:
+                        item.setBackground(bg)
+        best_wings = [wings[i] for i in best if 0 <= i < len(wings) and wings[i].analysis]
+        mean_ci = float(np.mean([w.analysis.CI for w in best_wings])) if best_wings else 0.0
+        mean_dsa = float(np.mean([w.analysis.DsA for w in best_wings])) if best_wings else 0.0
+        mean_hi = float(np.mean([w.analysis.HI for w in best_wings])) if best_wings else 0.0
         best_nums = [str(i + 1) for i in best]
         QMessageBox.information(
             self, "🏆 Лучшие пчёлы семьи",
             f"Наиболее породные крылья (тройная фильтрация CI→DsA→HI):\n\n"
             f"Крылья №: {', '.join(best_nums)}\n"
-            f"Всего: {len(best)} из {self.results_table.rowCount()}\n\n"
+            f"Всего: {len(best)} из {len(wings)}\n\n"
+            f"Породное ядро семьи (средние по лучшим крыльям):\n"
+            f"• CI: {mean_ci:.3f}\n"
+            f"• DsA: {mean_dsa:+.2f}°\n"
+            f"• HI: {mean_hi:.3f}\n\n"
             f"Они выделены золотистым цветом в таблице."
         )
 

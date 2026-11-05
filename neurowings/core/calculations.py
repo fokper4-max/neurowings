@@ -425,7 +425,8 @@ _KARTASHOV_HYB_SLICES = {
 def calculate_hybridization_score(
     values: List[float],
     breed_name: str,
-    index_type: str
+    index_type: str,
+    mating_mode: str = "purebred",
 ) -> int:
     """
     Рассчитать баллы за гибридизацию строго 1:1 по алгоритму В.А. Карташева
@@ -516,9 +517,10 @@ def calculate_hybridization_score(
 
     pct_rank2 = 100.0 * rank2 / total_wings
     pct_rank1 = 100.0 * rank1 / total_wings
-    if pct_rank2 > 2.0 or pct_rank1 > 15.0:
+    r1_scale = 1.15 if mating_mode == "free_mated" else 1.0
+    if pct_rank2 > 2.0 or pct_rank1 > 15.0 * r1_scale:
         return 0
-    if pct_rank2 > 1.0 or pct_rank1 > 7.5:
+    if pct_rank2 > 1.0 or pct_rank1 > 7.5 * r1_scale:
         return 1
     if pct_rank2 > 0.0 or pct_rank1 > 0.0:
         return 2

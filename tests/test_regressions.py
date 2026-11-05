@@ -381,5 +381,178 @@ class Regression(unittest.TestCase):
    self.assertAlmostEqual(win.current_image.wings[0].points[0].y, 10.0)
    win.close()
 
+ def test_find_best_bees_and_highlight(self):
+  """Проверка тройной фильтрации find_best_bees (CI→DsA→HI) и подсветки в AnalysisWidget."""
+  from unittest.mock import patch
+  from PyQt5.QtWidgets import QMessageBox
+  from neurowings.core.colony_analysis import find_best_bees
+
+  # Ядро семьи: 12 крыльев Carnica в одном классе (CI~2.45, DsA~+2.1, HI~0.96)
+  core_wings = [self._make_analyzed_wing(2.45, 2.1, 0.96, enabled=True) for _ in range(12)]
+  # Выбросы по CI (Mellifera), по DsA и по HI + одно отключённое крыло в пике
+  outlier_ci = self._make_analyzed_wing(1.60, 2.1, 0.96, enabled=True)
+  outlier_dsa = self._make_analyzed_wing(2.45, -4.5, 0.96, enabled=True)
+  outlier_hi = self._make_analyzed_wing(2.45, 2.1, 0.72, enabled=True)
+  disabled_core = self._make_analyzed_wing(2.45, 2.1, 0.96, enabled=False)
+
+  wings = core_wings + [outlier_ci, outlier_dsa, outlier_hi, disabled_core]
+  best = find_best_bees(wings)
+  self.assertEqual(best, list(range(12)))
+  self.assertEqual(find_best_bees([]), [])
+
+  # Проверка кнопки «🏆 Лучшие пчёлы» в обычном режиме (ImageData) и aggregate_mode (list)
+  aw = AnalysisWidget()
+  img_data = ImageData(Path("colony.jpg"), wings=wings, width=1000, height=1000)
+  img_data.analyze_all_wings = lambda: None
+  aw.update_statistics(img_data)
+  with patch.object(QMessageBox, "information") as mock_info:
+   aw._highlight_best_bees()
+   self.assertTrue(mock_info.called)
+   msg_text = mock_info.call_args[0][2]
+   self.assertIn("Породное ядро семьи", msg_text)
+   self.assertIn("2.450", msg_text)
+  # Первая строка (ядро) выделена золотистым цветом, строка с выбросом (12) — нет
+  self.assertEqual(aw.results_table.item(0, 0).background().color().name().lower(), "#fff3bf")
+  self.assertNotEqual(aw.results_table.item(12, 0).background().color().name().lower(), "#fff3bf")
+
+  # В режиме aggregate_mode (список крыльев) не должно быть AttributeError
+  aw.update_statistics(wings)
+  with patch.object(QMessageBox, "information") as mock_info:
+   aw._highlight_best_bees()
+   self.assertTrue(mock_info.called)
+
+ def test_mating_mode_purebred_vs_free_mated(self):
+  """Проверка переключателя Чистопородная / Свободноспаренная (±15% к границам породы)."""
+  from neurowings.ui.interpretation_widget import InterpretationWidget
+  from neurowings.core.colony_analysis import analyze_colony
+
+  interp = InterpretationWidget()
+  self.assertEqual(interp.get_mating_mode(), "purebred")
+
+  # Carpatica CI стандарт: 2.30..3.00 (span=0.70). Значение 2.22 ниже 2.30:
+  # В режиме purebred (lo=2.30) -> 2.22 попадает в warn ("Небольшое отклонение").
+  txt_pure, state_pure = interp._evaluate_index_for_breed(2.22, "Carpatica", "CI")
+  self.assertEqual(state_pure, "warn")
+  self.assertNotIn("(свободн.)", txt_pure)
+
+  # Переключаем на Свободноспаренная (free_mated): lo расширяется до 2.30 - 0.105 = 2.195 -> state="good"
+  idx_free = interp.mating_combo.findData("free_mated")
+  interp.mating_combo.setCurrentIndex(idx_free)
+  self.assertEqual(interp.get_mating_mode(), "free_mated")
+  txt_free, state_free = interp._evaluate_index_for_breed(2.22, "Carpatica", "CI")
+  self.assertEqual(state_free, "good")
+  self.assertIn("(свободн.)", txt_free)
+
+  # Проверка analyze_colony с mating_mode="free_mated" vs "purebred"
+  wings = [self._make_analyzed_wing(2.22, 2.5, 0.90) for _ in range(10)]
+  res_pure = analyze_colony(wings, target_breed="Carpatica", reanalyze_wings=False, mating_mode="purebred")
+  res_free = analyze_colony(wings, target_breed="Carpatica", reanalyze_wings=False, mating_mode="free_mated")
+  self.assertEqual(len(res_pure.wings_in_eval_breed), 0)
+  self.assertEqual(len(res_free.wings_in_eval_breed), 10)
+  self.assertIn("свободноспаренная матка", res_free.verdict_title)
+
+ def test_cursors_keyboard_placement_and_minimap(self):
+  """Проверка контрастных курсоров, расстановки по Space/Enter и миникарты MiniMapWidget."""
+  from unittest.mock import patch
+  from PyQt5.QtWidgets import QGraphicsScene
+  from PyQt5.QtCore import Qt, QEvent, QPoint, QPointF
+  from PyQt5.QtGui import QKeyEvent, QMouseEvent
+  from neurowings.ui.graphics_view import ZoomableGraphicsView, _get_cached_cursors
+  from neurowings.ui.main_window import MainWindow
+
+  # 1. Проверка кэшированных контрастных курсоров (25x25 с прозрачным центром 12,12)
+  c_edit, c_add, c_bbox = _get_cached_cursors()
+  for cur in (c_edit, c_add, c_bbox):
+   self.assertEqual(cur.shape(), Qt.BitmapCursor)
+   self.assertFalse(cur.pixmap().isNull())
+   self.assertEqual((cur.pixmap().width(), cur.pixmap().height()), (25, 25))
+   img = cur.pixmap().toImage()
+   self.assertEqual(img.pixelColor(12, 12).alpha(), 0)
+
+  scene = QGraphicsScene(0, 0, 2000, 1500)
+  view = ZoomableGraphicsView(scene)
+  view.resize(800, 600)
+  view.show()
+  app.processEvents()
+
+  for mode, expected_shape in [
+   (EditMode.VIEW, Qt.OpenHandCursor),
+   (EditMode.EDIT, Qt.BitmapCursor),
+   (EditMode.ADD, Qt.BitmapCursor),
+   (EditMode.BBOX, Qt.BitmapCursor),
+   (EditMode.VIEW, Qt.OpenHandCursor),
+  ]:
+   view.set_edit_mode(mode)
+   self.assertEqual(view.cursor().shape(), expected_shape)
+   self.assertEqual(view.viewport().cursor().shape(), expected_shape)
+
+  # 2. Клавиатурная расстановка точек по Space/Enter в режиме ADD + защита от автоповтора
+  clicked_coords = []
+  view.scene_clicked.connect(lambda x, y: clicked_coords.append((x, y)))
+  view.set_edit_mode(EditMode.ADD)
+  view._last_mouse_pos = QPoint(250, 200)
+  view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+  self.assertEqual(len(clicked_coords), 1)
+  # Автоповтор при зажатом пробеле игнорируется
+  view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier, " ", True, 1))
+  self.assertEqual(len(clicked_coords), 1)
+  view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Return, Qt.NoModifier))
+  self.assertEqual(len(clicked_coords), 2)
+
+  # Клавиатурное создание рамки в режиме BBOX (два нажатия Space)
+  created_bboxes = []
+  view.bbox_created.connect(lambda x1, y1, x2, y2: created_bboxes.append((x1, y1, x2, y2)))
+  view.set_edit_mode(EditMode.BBOX)
+  view._last_mouse_pos = QPoint(100, 100)
+  view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+  self.assertIsNotNone(view._bbox_start)
+  view._last_mouse_pos = QPoint(300, 260)
+  view.keyPressEvent(QKeyEvent(QEvent.KeyPress, Qt.Key_Space, Qt.NoModifier))
+  self.assertIsNone(view._bbox_start)
+  self.assertEqual(len(created_bboxes), 1)
+
+  # 3. Миникарта MiniMapWidget: показ/скрытие, ресайз, зум и навигация кликом
+  self.assertFalse(hasattr(view, "_minimap") and view._minimap is not None)
+  view.toggle_minimap()
+  self.assertIsNotNone(view._minimap)
+  self.assertTrue(view._minimap.isVisible())
+
+  # Проверка позиционирования в правом верхнем углу вьюпорта (не перекрывает скроллбары)
+  vp_w = view.viewport().width()
+  self.assertEqual(view._minimap.x(), vp_w - view._minimap.width() - 8)
+  self.assertEqual(view._minimap.y(), 8)
+
+  # При ресайзе окна миникарта перепозиционируется и не уходит в отрицательные координаты
+  view.resize(1000, 700)
+  app.processEvents()
+  self.assertEqual(view._minimap.x(), view.viewport().width() - view._minimap.width() - 8)
+
+  # Навигация по клику на миникарте центрирует вид
+  view.scale(3.0, 3.0)
+  nav_targets = []
+  view._minimap.navigation_requested.connect(lambda sx, sy: nav_targets.append((sx, sy)))
+  press_ev = QMouseEvent(
+   QEvent.MouseButtonPress,
+   QPointF(view._minimap.width() / 2, view._minimap.height() / 2),
+   Qt.LeftButton, Qt.LeftButton, Qt.NoModifier
+  )
+  view._minimap.mousePressEvent(press_ev)
+  view._minimap.mouseReleaseEvent(press_ev)
+  self.assertEqual(len(nav_targets), 1)
+  self.assertAlmostEqual(nav_targets[0][0], 1000.0, delta=50.0)
+  self.assertAlmostEqual(nav_targets[0][1], 750.0, delta=50.0)
+
+  # Повторный toggle скрывает миникарту
+  view.toggle_minimap()
+  self.assertFalse(view._minimap.isVisible())
+  view.close()
+
+  # Проверка интеграции с MainWindow._toggle_minimap
+  with patch.object(MainWindow, "_load_models"), patch.object(MainWindow, "_load_gpt_config"):
+   win = MainWindow()
+  win._toggle_minimap()
+  self.assertTrue(hasattr(win.view, "_minimap") and win.view._minimap is not None)
+  win.close()
+
 if __name__=='__main__':
  unittest.main()

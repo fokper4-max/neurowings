@@ -169,41 +169,56 @@ def _excel_roundup_score(id_pct: float) -> int:
     return max(0, 5 + roundup_value)
 
 
-def _build_verdict(score: int, eval_breed_ru: str, total: int, identified: int) -> Tuple[str, str, str]:
+def _build_verdict(
+    score: int,
+    eval_breed_ru: str,
+    total: int,
+    identified: int,
+    mating_mode: str = "purebred",
+    means_in_expanded_breed: bool = False,
+) -> Tuple[str, str, str]:
+    is_free = (mating_mode == "free_mated")
+    mode_tag = " (режим: свободноспаренная матка)" if is_free else ""
     if total == 0:
         return ("Нет активных крыльев для расчёта", "Включите крылья в таблице или распознайте скан.", "neutral")
-    if identified == 0:
+    if identified == 0 and not (is_free and means_in_expanded_breed):
         return (
-            "Помесь / вне чистопородного стандарта",
+            f"Помесь / вне чистопородного стандарта{mode_tag}",
             "Ни одно крыло не попало в эталонные границы чистых пород (возможен сложный гибрид или Бакфаст). Использовать как пользовательную семью на мёд.",
             "bad",
         )
     if score >= 17:
         return (
-            f"Элита породы: {eval_breed_ru}",
+            f"Элита породы: {eval_breed_ru}{mode_tag}",
             "Эталонная чистопородная семья (17 баллов). Рекомендуется как родоначальница линии и для племенного вывода маток.",
             "elite",
         )
     if score >= 15:
         return (
-            f"Чистопородная семья: {eval_breed_ru}",
+            f"Чистопородная семья: {eval_breed_ru}{mode_tag}",
             "Отличное качество семьи (15–16 баллов). Полностью подходит для репродукции и вывода племенных маток.",
+            "good",
+        )
+    if is_free and score >= 11 and means_in_expanded_breed:
+        return (
+            f"Чистопородная свободноспаренная семья: {eval_breed_ru}{mode_tag}",
+            "Хорошее соответствие породе для свободноспаренной матки (≥11 баллов, средние индексы в допустимом диапазоне ±15%). Пригодна как пользовательная чистопородная семья и для работы на пасеке.",
             "good",
         )
     if score >= 10:
         return (
-            f"Хорошая семья ({eval_breed_ru}) — пригодна для селекции",
+            f"Хорошая семья ({eval_breed_ru}) — пригодна для селекции{mode_tag}",
             "Хорошая породность (10–14 баллов), имеется небольшая неоднородность или следы примеси. Подходит для селекционной работы и контроля трутневого фона.",
             "warn",
         )
     if score >= 5:
         return (
-            f"Пользовательная семья ({eval_breed_ru} с примесью)",
+            f"Пользовательная семья ({eval_breed_ru} с примесью){mode_tag}",
             "Заметная гибридизация (5–9 баллов). Семья пригодна для товарного медосбора («для себя»), но не рекомендуется для вывода маток.",
             "warn",
         )
     return (
-        "Сильная метизация / гибридная семья",
+        f"Сильная метизация / гибридная семья{mode_tag}",
         "Низкий балл чистопородности (< 5 баллов). Высокий разброс признаков; рекомендуется плановая замена матки на чистопородную.",
         "bad",
     )
@@ -216,11 +231,13 @@ class ColonyAnalysisService:
     def analyze_wings(
         wings: List[Wing],
         target_breed: Optional[str] = None,
+        mating_mode: str = "purebred",
     ) -> ColonyAnalysisResult:
         res = ColonyAnalysisResult()
         if not wings:
             return res
 
+        is_free = (mating_mode == "free_mated")
         res.total_wings_all = len(wings)
         active_entries: List[Tuple[int, Wing]] = [
             (idx + 1, w) for idx, w in enumerate(wings) if getattr(w, "is_enabled", True)
@@ -229,7 +246,9 @@ class ColonyAnalysisService:
         res.total = len(active_entries)
 
         if res.total == 0:
-            res.verdict_title, res.verdict_recommendation, res.verdict_level = _build_verdict(0, "—", 0, 0)
+            res.verdict_title, res.verdict_recommendation, res.verdict_level = _build_verdict(
+                0, "—", 0, 0, mating_mode=mating_mode
+            )
             return res
 
         ci_values: List[float] = []
@@ -332,19 +351,35 @@ class ColonyAnalysisService:
         res.eval_breed_ru = format_breed_ru(res.eval_breed)
 
         # Какие крылья укладываются в стандарт целевой породы (eval_breed)
+        means_in_expanded_breed = False
         if res.eval_breed and res.eval_breed in BREEDS:
             br = BREEDS[res.eval_breed]
+            exp_factor = 0.15 if is_free else 0.0
+            ci_lo, ci_hi = br["CI"]
+            ci_exp = exp_factor * (ci_hi - ci_lo)
+            dsa_lo, dsa_hi = br["DsA"]
+            dsa_exp = exp_factor * (dsa_hi - dsa_lo)
+            hi_lo, hi_hi = br["HI"]
+            hi_exp = exp_factor * (hi_hi - hi_lo)
+
             for wing_num, w in active_entries:
                 if not w.analysis or not w.analysis.is_valid:
                     res.wings_out_of_eval_breed.append(wing_num)
                     continue
-                ci_ok = br["CI"][0] <= w.analysis.CI <= br["CI"][1]
-                dsa_ok = br["DsA"][0] <= w.analysis.DsA <= br["DsA"][1]
-                hi_ok = br["HI"][0] <= w.analysis.HI <= br["HI"][1]
+                ci_ok = (ci_lo - ci_exp) <= w.analysis.CI <= (ci_hi + ci_exp)
+                dsa_ok = (dsa_lo - dsa_exp) <= w.analysis.DsA <= (dsa_hi + dsa_exp)
+                hi_ok = (hi_lo - hi_exp) <= w.analysis.HI <= (hi_hi + hi_exp)
                 if ci_ok and dsa_ok and hi_ok:
                     res.wings_in_eval_breed.append(wing_num)
                 else:
                     res.wings_out_of_eval_breed.append(wing_num)
+
+            if ci_values and dsa_values and hi_values:
+                means_in_expanded_breed = (
+                    (ci_lo - ci_exp) <= res.ci.mean <= (ci_hi + ci_exp)
+                    and (dsa_lo - dsa_exp) <= res.dsa.mean <= (dsa_hi + dsa_exp)
+                    and (hi_lo - hi_exp) <= res.hi.mean <= (hi_hi + hi_exp)
+                )
         else:
             for wing_num, w in active_entries:
                 if w.analysis and w.analysis.is_identified:
@@ -364,14 +399,16 @@ class ColonyAnalysisService:
             res.breed_match_pct = 0.0
             res.breed_score = 0
 
+        cv_scale = 1.15 if is_free else 1.0
+
         # 3. Целостность семьи по CI (0..2)
         if not ci_values:
             res.ci_integrity = "нет данных"
             res.ci_score = 0
-        elif res.ci.cv < 12.5:
+        elif res.ci.cv < 12.5 * cv_scale:
             res.ci_integrity = "идеальная"
             res.ci_score = 2
-        elif res.ci.cv <= 20.0:
+        elif res.ci.cv <= 20.0 * cv_scale:
             res.ci_integrity = "нормальная"
             res.ci_score = 1
         else:
@@ -381,7 +418,7 @@ class ColonyAnalysisService:
         # 4. Целостность семьи по DsA (информативно, без баллов)
         if not dsa_values or abs(res.dsa.mean) < 0.5:
             res.dsa_integrity = "не оценивается (среднее около 0°)"
-        elif res.dsa.cv < 50.0:
+        elif res.dsa.cv < 50.0 * cv_scale:
             res.dsa_integrity = "нормальная"
         else:
             res.dsa_integrity = "не обеспечена"
@@ -390,10 +427,10 @@ class ColonyAnalysisService:
         if not hi_values:
             res.hi_integrity = "нет данных"
             res.hi_score = 0
-        elif res.hi.cv < 6.5:
+        elif res.hi.cv < 6.5 * cv_scale:
             res.hi_integrity = "идеальная"
             res.hi_score = 2
-        elif res.hi.cv <= 7.5:
+        elif res.hi.cv <= 7.5 * cv_scale:
             res.hi_integrity = "нормальная"
             res.hi_score = 1
         else:
@@ -402,9 +439,9 @@ class ColonyAnalysisService:
 
         # 6. Гибридизация по CI, DsA, HI (по 0..3 балла, но ТОЛЬКО если порода определена!)
         if res.eval_breed and res.eval_breed in BREEDS:
-            res.ci_hyb_score = calculate_hybridization_score(ci_values, res.eval_breed, "CI")
-            res.dsa_hyb_score = calculate_hybridization_score(dsa_values, res.eval_breed, "DsA")
-            res.hi_hyb_score = calculate_hybridization_score(hi_values, res.eval_breed, "HI")
+            res.ci_hyb_score = calculate_hybridization_score(ci_values, res.eval_breed, "CI", mating_mode=mating_mode)
+            res.dsa_hyb_score = calculate_hybridization_score(dsa_values, res.eval_breed, "DsA", mating_mode=mating_mode)
+            res.hi_hyb_score = calculate_hybridization_score(hi_values, res.eval_breed, "HI", mating_mode=mating_mode)
         else:
             res.ci_hyb_score = 0
             res.dsa_hyb_score = 0
@@ -431,6 +468,8 @@ class ColonyAnalysisService:
             res.eval_breed_ru,
             res.total,
             res.identified if not (target_breed and target_breed in BREEDS) else len(res.wings_in_eval_breed),
+            mating_mode=mating_mode,
+            means_in_expanded_breed=means_in_expanded_breed,
         )
         return res
 
@@ -439,12 +478,15 @@ class ColonyAnalysisService:
         image_data: ImageData,
         target_breed: Optional[str] = None,
         reanalyze_wings: bool = True,
+        mating_mode: str = "purebred",
     ) -> ColonyAnalysisResult:
         if not image_data or not image_data.wings:
             return ColonyAnalysisResult()
         if reanalyze_wings and hasattr(image_data, "analyze_all_wings"):
             image_data.analyze_all_wings()
-        result = ColonyAnalysisService.analyze_wings(image_data.wings, target_breed=target_breed)
+        result = ColonyAnalysisService.analyze_wings(
+            image_data.wings, target_breed=target_breed, mating_mode=mating_mode
+        )
         if hasattr(image_data, "analysis_results") and isinstance(image_data.analysis_results, dict):
             image_data.analysis_results.update(result.to_summary_dict())
         return result
@@ -454,30 +496,58 @@ def analyze_colony(
     wings_or_image,
     target_breed: Optional[str] = None,
     reanalyze_wings: bool = True,
+    mating_mode: str = "purebred",
 ) -> ColonyAnalysisResult:
     """Удобная функция-фасад для расчёта статистики семьи по ImageData или списку Wing."""
     if isinstance(wings_or_image, list):
-        return ColonyAnalysisService.analyze_wings(wings_or_image, target_breed=target_breed)
+        return ColonyAnalysisService.analyze_wings(
+            wings_or_image, target_breed=target_breed, mating_mode=mating_mode
+        )
     return ColonyAnalysisService.analyze_image(
-        wings_or_image, target_breed=target_breed, reanalyze_wings=reanalyze_wings
+        wings_or_image,
+        target_breed=target_breed,
+        reanalyze_wings=reanalyze_wings,
+        mating_mode=mating_mode,
     )
+
+
+CI_BINS: List[float] = [
+    0.71, 0.76, 0.81, 0.87, 0.93, 1.0, 1.07, 1.14, 1.22, 1.31,
+    1.4, 1.5, 1.61, 1.73, 1.86, 2.0, 2.16, 2.33, 2.53, 2.75,
+    3.0, 3.29, 3.62, 4.0, 4.45, 5.0, 5.67, 6.5, 7.57, 9.0, 10.5,
+]
+DSA_BINS: List[float] = [
+    -16.29, -15.31, -14.33, -13.36, -12.39, -11.42, -10.46, -9.5, -8.54, -7.59,
+    -6.63, -5.68, -4.73, -3.78, -2.84, -1.89, -0.95, 0.0, 0.95, 1.89,
+    2.84, 3.78, 4.73, 5.68, 6.63, 7.59, 8.54, 9.5, 10.46, 11.42, 12.39,
+]
+HI_BINS: List[float] = [
+    0.6, 0.616, 0.63, 0.648, 0.666, 0.685, 0.704, 0.724, 0.744, 0.765,
+    0.786, 0.807, 0.829, 0.852, 0.875, 0.899, 0.923, 0.948, 0.974, 1.0,
+    1.027, 1.053, 1.083, 1.113, 1.143, 1.174, 1.206, 1.239, 1.272, 1.308,
+    1.344, 1.381, 1.42,
+]
 
 
 def find_best_bees(
     wings: List[Wing],
-    peak_width: int = 1,
+    peak_width: int = 2,
 ) -> List[int]:
-    """Определить «лучших пчёл» семьи по алгоритму Карташёва (Лучшая пчела.xlsm).
+    """Определить «лучших пчёл» семьи 1:1 по алгоритму Карташёва (Лучшая пчела.xlsm, лист «База» + Макрос2).
 
     Тройная фильтрация по пикам графиков CI → DsA → HI:
-    1) Все крылья сортируются по CI, выделяется группа класса с максимальным числом крыльев (±peak_width классов).
-    2) Из выделенных крыльев — аналогичная фильтрация по DsA.
-    3) Из оставшихся — фильтрация по HI.
-    Возвращает список индексов крыльев (0-based), прошедших все три фильтра.
+    1) По всей пробе семьи через FREQUENCY(vals, bins) находится пиковая корзина m (в первых 31 корзинах)
+       для каждого из трёх индексов (CI, DsA, HI).
+    2) Границы отбора для ширины пика pw (1, 2 или 3):
+       low_idx = max(0, m - 1 - (1 if pw == 3 else 0)) -> v_min_bound = bins[low_idx]
+       high_idx = min(len(bins) - 1, m + (1 if pw > 1 else 0)) -> v_max_bound = bins[high_idx]
+    3) Крыло проходит фильтр по индексу, если v_min_bound <= round(val, 3) <= v_max_bound.
+    4) Если при текущем peak_width после 3 фильтров получилось 0 крыльев и peak_width < 3,
+       автоматически пробуется peak_width + 1 (вплоть до 3).
 
     Args:
         wings: Список крыльев семьи (Wing).
-        peak_width: Ширина пика (1 = один класс, 2 = два соседних, 3 = три).
+        peak_width: Ширина пика (по умолчанию 2; 1 = узкий пик, 2 = стандарт, 3 = широкий).
     Returns:
         Список 0-based индексов «лучших» крыльев.
     """
@@ -496,42 +566,46 @@ def find_best_bees(
     if not entries:
         return []
 
-    def _filter_by_peak(items, value_idx, peak_w):
-        """Фильтровать по пику: найти класс с максимальным числом значений."""
-        if not items:
-            return items
-        vals = [it[value_idx] for it in items]
-        v_min, v_max = min(vals), max(vals)
-        if v_max - v_min < 1e-9:
-            return items  # все одинаковые
-        # 31 класс (как у Карташёва)
-        n_classes = 31
-        bin_width = (v_max - v_min) / n_classes
-        if bin_width < 1e-12:
-            return items
+    def _excel_frequency_peak(vals: List[float], bins: List[float]) -> int:
+        """Аналог FREQUENCY(vals, bins) в Excel и поиск первого максимума в первых 31 корзинах."""
+        counts = [0] * len(bins)
+        for val in vals:
+            for i, b in enumerate(bins):
+                if i == 0:
+                    if val <= b + 1e-9:
+                        counts[0] += 1
+                        break
+                else:
+                    if bins[i - 1] + 1e-9 < val <= b + 1e-9:
+                        counts[i] += 1
+                        break
+        first_31 = counts[:31]
+        max_cnt = max(first_31) if first_31 else 0
+        return first_31.index(max_cnt) if max_cnt > 0 else 0
 
-        # Распределяем по классам
-        class_counts = [0] * n_classes
-        class_members = [[] for _ in range(n_classes)]
-        for it in items:
-            v = it[value_idx]
-            c = min(int((v - v_min) / bin_width), n_classes - 1)
-            class_counts[c] += 1
-            class_members[c].append(it)
+    def _peak_bounds(m: int, bins: List[float], pw: int) -> Tuple[float, float]:
+        low_idx = max(0, m - 1 - (1 if pw == 3 else 0))
+        high_idx = min(len(bins) - 1, m + (1 if pw > 1 else 0))
+        return bins[low_idx], bins[high_idx]
 
-        # Находим класс-пик
-        peak_class = max(range(n_classes), key=lambda c: class_counts[c])
+    ci_all = [it[1] for it in entries]
+    dsa_all = [it[2] for it in entries]
+    hi_all = [it[3] for it in entries]
 
-        # Собираем крылья из пика ± peak_width
-        half = peak_w - 1  # peak_width=1 → только пик, 2 → пик+1, 3 → пик±1
-        result = []
-        for c in range(max(0, peak_class - half), min(n_classes, peak_class + half + 1)):
-            result.extend(class_members[c])
-        return result if result else items
+    m_ci = _excel_frequency_peak(ci_all, CI_BINS)
+    m_dsa = _excel_frequency_peak(dsa_all, DSA_BINS)
+    m_hi = _excel_frequency_peak(hi_all, HI_BINS)
 
-    # Тройная фильтрация
-    step1 = _filter_by_peak(entries, 1, peak_width)   # по CI
-    step2 = _filter_by_peak(step1, 2, peak_width)     # по DsA
-    step3 = _filter_by_peak(step2, 3, peak_width)     # по HI
+    pw_start = max(1, min(3, int(peak_width)))
+    for pw in range(pw_start, 4):
+        ci_min, ci_max = _peak_bounds(m_ci, CI_BINS, pw)
+        dsa_min, dsa_max = _peak_bounds(m_dsa, DSA_BINS, pw)
+        hi_min, hi_max = _peak_bounds(m_hi, HI_BINS, pw)
 
-    return sorted([it[0] for it in step3])
+        step1 = [it for it in entries if ci_min - 1e-9 <= round(it[1], 3) <= ci_max + 1e-9]
+        step2 = [it for it in step1 if dsa_min - 1e-9 <= round(it[2], 3) <= dsa_max + 1e-9]
+        step3 = [it for it in step2 if hi_min - 1e-9 <= round(it[3], 3) <= hi_max + 1e-9]
+        if step3:
+            return sorted([it[0] for it in step3])
+
+    return []

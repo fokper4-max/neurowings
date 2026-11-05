@@ -14,18 +14,19 @@ from ..core.data_models import EditMode
 from .graphics_items import PointItem, BBoxItem
 
 
-def _make_crosshair_cursor(color: QColor, size: int = 24, thickness: int = 2) -> QCursor:
-    """Создать яркий курсор-перекрестие с тёмной обводкой для контраста на любом фоне."""
+def _make_crosshair_cursor(color: QColor, size: int = 25, thickness: int = 2) -> QCursor:
+    """Создать яркий курсор-перекрестие с тёмной обводкой и открытым центром для точного прицеливания."""
     pm = QPixmap(size, size)
     pm.fill(Qt.transparent)
     from PyQt5.QtGui import QPainter as _P
     p = _P(pm)
     p.setRenderHint(_P.Antialiasing, False)
     mid = size // 2
-    gap = 2  # зазор в центре для точности прицеливания
+    gap = 4  # прозрачное окошко радиусом 4 px в центре, чтобы не перекрывать узелок жилки
 
     # Тёмная обводка (чёрная, толще на 2 px)
     outline = QPen(QColor(0, 0, 0), thickness + 2)
+    outline.setCapStyle(Qt.FlatCap)
     p.setPen(outline)
     p.drawLine(mid, 0, mid, mid - gap)        # верх
     p.drawLine(mid, mid + gap, mid, size - 1)  # низ
@@ -34,16 +35,13 @@ def _make_crosshair_cursor(color: QColor, size: int = 24, thickness: int = 2) ->
 
     # Яркий цвет
     bright = QPen(color, thickness)
+    bright.setCapStyle(Qt.FlatCap)
     p.setPen(bright)
     p.drawLine(mid, 0, mid, mid - gap)
     p.drawLine(mid, mid + gap, mid, size - 1)
     p.drawLine(0, mid, mid - gap, mid)
     p.drawLine(mid + gap, mid, size - 1, mid)
 
-    # Центральная точка
-    p.setPen(Qt.NoPen)
-    p.setBrush(QBrush(color))
-    p.drawEllipse(mid - 1, mid - 1, 3, 3)
     p.end()
     return QCursor(pm, mid, mid)
 
@@ -58,9 +56,9 @@ def _get_cached_cursors():
     """Ленивая инициализация курсоров (QPixmap нельзя до QApplication)."""
     global _CURSOR_EDIT, _CURSOR_ADD, _CURSOR_BBOX
     if _CURSOR_EDIT is None:
-        _CURSOR_EDIT = _make_crosshair_cursor(QColor(0, 255, 255), 24, 2)    # голубой
-        _CURSOR_ADD = _make_crosshair_cursor(QColor(255, 255, 0), 24, 2)     # жёлтый
-        _CURSOR_BBOX = _make_crosshair_cursor(QColor(0, 255, 100), 24, 2)    # зелёный
+        _CURSOR_EDIT = _make_crosshair_cursor(QColor(0, 255, 255), 25, 2)    # голубой
+        _CURSOR_ADD = _make_crosshair_cursor(QColor(255, 255, 0), 25, 2)     # жёлтый
+        _CURSOR_BBOX = _make_crosshair_cursor(QColor(0, 255, 100), 25, 2)    # зелёный
     return _CURSOR_EDIT, _CURSOR_ADD, _CURSOR_BBOX
 
 
@@ -102,6 +100,9 @@ class ZoomableGraphicsView(QGraphicsView):
 
         self._bbox_start = None
         self._bbox_rect = None
+        self._last_mouse_pos = None
+        if self.scene() is not None:
+            self.scene().sceneRectChanged.connect(lambda _: self._sync_minimap())
 
     def _show_context_menu(self, pos):
         """Показать контекстное меню"""
@@ -144,20 +145,29 @@ class ZoomableGraphicsView(QGraphicsView):
 
     def set_edit_mode(self, mode: EditMode):
         """Установить режим редактирования с яркими контрастными курсорами"""
+        if self._bbox_rect is not None and self.scene() is not None:
+            self.scene().removeItem(self._bbox_rect)
+        self._bbox_start = None
+        self._bbox_rect = None
+
         self.edit_mode = mode
         cur_edit, cur_add, cur_bbox = _get_cached_cursors()
         if mode == EditMode.VIEW:
             self.setDragMode(QGraphicsView.ScrollHandDrag)
             self.setCursor(Qt.OpenHandCursor)
+            self.viewport().setCursor(Qt.OpenHandCursor)
         elif mode == EditMode.EDIT:
             self.setDragMode(QGraphicsView.NoDrag)
             self.setCursor(cur_edit)
+            self.viewport().setCursor(cur_edit)
         elif mode == EditMode.ADD:
             self.setDragMode(QGraphicsView.NoDrag)
             self.setCursor(cur_add)
+            self.viewport().setCursor(cur_add)
         elif mode == EditMode.BBOX:
             self.setDragMode(QGraphicsView.NoDrag)
             self.setCursor(cur_bbox)
+            self.viewport().setCursor(cur_bbox)
 
     def _add_scroll_buttons(self):
         self.btn_up = QToolButton(self)
@@ -210,6 +220,14 @@ class ZoomableGraphicsView(QGraphicsView):
         self.horizontalScrollBar().setValue(self.horizontalScrollBar().value() + dx)
         self.verticalScrollBar().setValue(self.verticalScrollBar().value() + dy)
 
+    def scale(self, sx: float, sy: float):
+        super().scale(sx, sy)
+        self._sync_minimap()
+
+    def resetTransform(self):
+        super().resetTransform()
+        self._sync_minimap()
+
     def wheelEvent(self, event):
         self._fit_mode = False
         factor = 1.25
@@ -221,6 +239,12 @@ class ZoomableGraphicsView(QGraphicsView):
             if self._zoom > 0.05:
                 self.scale(1 / factor, 1 / factor)
                 self._zoom /= factor
+        self._sync_minimap()
+
+    def _current_cursor_viewport_pos(self) -> QPoint:
+        if self._last_mouse_pos is not None:
+            return self._last_mouse_pos
+        return self.viewport().mapFromGlobal(QCursor.pos())
 
     def keyPressEvent(self, event):
         key = event.key()
@@ -228,19 +252,38 @@ class ZoomableGraphicsView(QGraphicsView):
 
         # Space/Enter = «клик» под курсором (режимы ADD и BBOX)
         if key in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
+            if event.isAutoRepeat():
+                return
             if self.edit_mode == EditMode.ADD:
-                cursor_pos = self.mapFromGlobal(QCursor.pos())
+                cursor_pos = self._current_cursor_viewport_pos()
                 scene_pos = self.mapToScene(cursor_pos)
                 self.scene_clicked.emit(scene_pos.x(), scene_pos.y())
                 return
-            elif self.edit_mode == EditMode.BBOX and self._bbox_start is None:
-                cursor_pos = self.mapFromGlobal(QCursor.pos())
+            elif self.edit_mode == EditMode.BBOX:
+                cursor_pos = self._current_cursor_viewport_pos()
                 scene_pos = self.mapToScene(cursor_pos)
-                self._bbox_start = scene_pos
-                self._bbox_rect = QGraphicsRectItem()
-                self._bbox_rect.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
-                self._bbox_rect.setBrush(QBrush(QColor(0, 255, 0, 30)))
-                self.scene().addItem(self._bbox_rect)
+                if self._bbox_start is None:
+                    self._bbox_start = scene_pos
+                    self._bbox_rect = QGraphicsRectItem()
+                    self._bbox_rect.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
+                    self._bbox_rect.setBrush(QBrush(QColor(0, 255, 0, 30)))
+                    self.scene().addItem(self._bbox_rect)
+                elif self._bbox_rect is not None:
+                    x1 = min(self._bbox_start.x(), scene_pos.x())
+                    y1 = min(self._bbox_start.y(), scene_pos.y())
+                    x2 = max(self._bbox_start.x(), scene_pos.x())
+                    y2 = max(self._bbox_start.y(), scene_pos.y())
+                    self._bbox_rect.setRect(x1, y1, x2 - x1, y2 - y1)
+                    rect = self._bbox_rect.rect()
+                    self.scene().removeItem(self._bbox_rect)
+                    if rect.width() > 10 and rect.height() > 10:
+                        self.bbox_created.emit(
+                            rect.x(), rect.y(),
+                            rect.x() + rect.width(),
+                            rect.y() + rect.height()
+                        )
+                    self._bbox_start = None
+                    self._bbox_rect = None
                 return
 
         if key in (Qt.Key_W, Qt.Key_Up):
@@ -255,20 +298,9 @@ class ZoomableGraphicsView(QGraphicsView):
             super().keyPressEvent(event)
 
     def mousePressEvent(self, event):
+        self._last_mouse_pos = event.pos()
         if event.button() == Qt.LeftButton:
-            item = self.itemAt(event.pos())
-            if item is not None and isinstance(item.parentItem(), PointItem):
-                item = item.parentItem()
             scene_pos = self.mapToScene(event.pos())
-
-            if isinstance(item, PointItem) and item.global_idx >= 0:
-                self.point_clicked.emit(item.global_idx, item.wing_idx, item.point_idx)
-
-                # Разрешаем перетаскивать точку мышкой как в режиме EDIT, так и прямо в режиме VIEW!
-                if self.edit_mode in (EditMode.EDIT, EditMode.VIEW):
-                    self._dragging_point = item
-                    self._drag_start_pos = scene_pos
-                return
 
             if self.edit_mode == EditMode.ADD:
                 self.scene_clicked.emit(scene_pos.x(), scene_pos.y())
@@ -281,9 +313,23 @@ class ZoomableGraphicsView(QGraphicsView):
                 self.scene().addItem(self._bbox_rect)
                 return
 
+            item = self.itemAt(event.pos())
+            if item is not None and isinstance(item.parentItem(), PointItem):
+                item = item.parentItem()
+
+            if isinstance(item, PointItem) and item.global_idx >= 0:
+                self.point_clicked.emit(item.global_idx, item.wing_idx, item.point_idx)
+
+                # Разрешаем перетаскивать точку мышкой как в режиме EDIT, так и прямо в режиме VIEW!
+                if self.edit_mode in (EditMode.EDIT, EditMode.VIEW):
+                    self._dragging_point = item
+                    self._drag_start_pos = scene_pos
+                return
+
         super().mousePressEvent(event)
 
     def mouseMoveEvent(self, event):
+        self._last_mouse_pos = event.pos()
         scene_pos = self.mapToScene(event.pos())
 
         if self._dragging_point is not None:
@@ -332,6 +378,7 @@ class ZoomableGraphicsView(QGraphicsView):
         self._fit_mode = True
         self.fitInView(self.sceneRect(), Qt.KeepAspectRatio)
         self._zoom = self.transform().m11()
+        self._sync_minimap()
 
     # ---- Миникарта (Панорамный обзор) ----
 
@@ -351,7 +398,7 @@ class ZoomableGraphicsView(QGraphicsView):
         vp = self.viewport()
         m = self._minimap
         margin = 8
-        m.move(vp.width() - m.width() - margin, margin)
+        m.move(max(margin, vp.width() - m.width() - margin), margin)
         m.raise_()
 
     def resizeEvent(self, event):
@@ -405,6 +452,7 @@ class MiniMapWidget(QWidget):
 
     def __init__(self, parent=None):
         super().__init__(parent)
+        self._parent_view = parent
         self.setFixedSize(self.MINIMAP_W, self.MINIMAP_H)
         self.setAttribute(Qt.WA_TransparentForMouseEvents, False)
         self.setMouseTracking(True)
@@ -468,19 +516,34 @@ class MiniMapWidget(QWidget):
         p.setPen(QPen(QColor(100, 100, 100), 1))
         p.drawRect(QRectF(x1, y1, x2 - x1, y2 - y1))
 
-        # Прямоугольник видимой области (красный)
-        vr = self._view_rect
+        # Контуры крыльев (BBoxItem) на скане
+        if self._parent_view is not None and self._parent_view.scene() is not None:
+            p.setPen(QPen(QColor(76, 175, 80, 190), 1))
+            p.setBrush(QBrush(QColor(76, 175, 80, 140)))
+            for item in self._parent_view.scene().items():
+                if isinstance(item, BBoxItem):
+                    br = item.mapRectToScene(item.rect())
+                    bx1, by1 = self._scene_to_widget(br.x(), br.y())
+                    bx2, by2 = self._scene_to_widget(br.x() + br.width(), br.y() + br.height())
+                    p.drawRect(QRectF(bx1, by1, max(2.0, bx2 - bx1), max(2.0, by2 - by1)))
+
+        # Прямоугольник видимой области (красный, ограниченный рамкой сцены)
+        vr = self._view_rect.intersected(sr)
+        if vr.isEmpty():
+            vr = self._view_rect
         vx1, vy1 = self._scene_to_widget(vr.x(), vr.y())
         vx2, vy2 = self._scene_to_widget(vr.x() + vr.width(), vr.y() + vr.height())
         p.setPen(QPen(QColor(255, 50, 50), 2))
         p.setBrush(QBrush(QColor(255, 50, 50, 40)))
         p.drawRect(QRectF(vx1, vy1, vx2 - vx1, vy2 - vy1))
 
-        # Надпись
+        # Надпись и подсказка хоткея [M]
         p.setPen(QColor(180, 180, 180))
         from PyQt5.QtGui import QFont as _F
         p.setFont(_F("Arial", 8))
         p.drawText(4, self.height() - 4, "📍 Обзор")
+        p.setPen(QColor(180, 180, 180, 140))
+        p.drawText(self.width() - 22, self.height() - 4, "[M]")
         p.end()
 
     def mousePressEvent(self, event):
