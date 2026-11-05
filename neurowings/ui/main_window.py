@@ -16,7 +16,8 @@ from typing import Dict, Optional, List, Tuple
 from urllib.parse import urlparse
 
 from ..core import (
-    APP_NAME, APP_VERSION, APP_AUTHOR, APP_MAX_URL, APP_TELEGRAM_LABEL, APP_TELEGRAM_URL, APP_UPDATE_FEED_URL,
+    APP_NAME, APP_VERSION, APP_AUTHOR, APP_MAX_URL, APP_TELEGRAM_LABEL, APP_TELEGRAM_URL,
+    APP_GITHUB_REPO, APP_GITHUB_RELEASES_API_URL, APP_GITHUB_RELEASES_HTML_URL, APP_UPDATE_FEED_URL,
     NUM_POINTS,
     COLOR_NORMAL, COLOR_YOLO, COLOR_STAGE1, COLOR_STAGE2, COLOR_GT,
     DEFAULT_POINT_RADIUS, YOLO_TO_WINGSDIG,
@@ -44,7 +45,7 @@ from PyQt5.QtWidgets import (
     QSplitter, QToolBar, QFileDialog, QMessageBox, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QScrollArea, QShortcut, QRadioButton, QButtonGroup, QAction, QTabWidget, QGridLayout,
-    QApplication, QMenu, QSizePolicy, QDialog, QDialogButtonBox, QProgressDialog
+    QApplication, QMenu, QSizePolicy, QDialog, QDialogButtonBox, QProgressDialog, QTextBrowser
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QUrl, QThread
 from PyQt5.QtGui import QPixmap, QColor, QKeySequence, QPen, QFont, QDesktopServices
@@ -277,6 +278,10 @@ class MainWindow(QMainWindow):
         # Вкладка общей интерпретации (агрегат по всем фото)
         self.global_interpretation_widget = GlobalInterpretationWidget(title="🌐 Общая интерпретация")
         self.tab_widget.addTab(self.global_interpretation_widget, "🌐 Общая интерпретация")
+
+        # Постоянная вкладка обновления программы (GitHub Releases)
+        self.update_tab = self._create_update_tab()
+        self.tab_widget.addTab(self.update_tab, "🔄 Обновление")
 
         self.analysis_widget.set_graphs_widget(self.graphs_widget)
         self._apply_gpt_to_widgets()
@@ -2445,8 +2450,183 @@ class MainWindow(QMainWindow):
         self.view.resetTransform()
         self.view._zoom = 1.0
 
+    def _create_update_tab(self) -> QWidget:
+        """Создать постоянную вкладку «🔄 Обновление» для проверки и установки обновлений с GitHub Releases."""
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+        layout.setContentsMargins(20, 18, 20, 18)
+        layout.setSpacing(14)
+
+        # 1. Карточка статуса версий
+        status_group = QGroupBox("📦 Статус версии и обновлений")
+        status_layout = QVBoxLayout(status_group)
+        status_layout.setSpacing(8)
+
+        self.lbl_update_current_ver = QLabel(
+            f"<b>Текущая установленная версия:</b> v{html.escape(APP_VERSION)}"
+        )
+        self.lbl_update_current_ver.setTextFormat(Qt.RichText)
+        status_layout.addWidget(self.lbl_update_current_ver)
+
+        self.lbl_update_latest_ver = QLabel(
+            f"<b>Последняя доступная версия на GitHub:</b> v{html.escape(APP_VERSION)} — "
+            f"<span style='color:#2b8a3e; font-weight:bold;'>У вас установлена самая последняя версия ✅</span>"
+        )
+        self.lbl_update_latest_ver.setWordWrap(True)
+        self.lbl_update_latest_ver.setTextFormat(Qt.RichText)
+        status_layout.addWidget(self.lbl_update_latest_ver)
+
+        self.lbl_update_source_date = QLabel(
+            f"<b>Источник обновлений:</b> GitHub Releases (<code>{html.escape(APP_GITHUB_REPO)}</code>)"
+        )
+        self.lbl_update_source_date.setWordWrap(True)
+        self.lbl_update_source_date.setTextFormat(Qt.RichText)
+        status_layout.addWidget(self.lbl_update_source_date)
+
+        layout.addWidget(status_group)
+
+        # 2. Блок «📋 Что нового в версии»
+        notes_group = QGroupBox("📋 Что нового в версии")
+        notes_layout = QVBoxLayout(notes_group)
+        self.txt_update_notes = QTextBrowser()
+        self.txt_update_notes.setOpenExternalLinks(True)
+        self.txt_update_notes.setHtml(self._default_release_notes_html())
+        notes_layout.addWidget(self.txt_update_notes)
+        layout.addWidget(notes_group, 1)
+
+        # 3. Прогресс-бар скачивания (скрыт по умолчанию, появляется во время загрузки)
+        self.update_tab_progress_box = QGroupBox("⬇️ Загрузка обновления")
+        prog_layout = QVBoxLayout(self.update_tab_progress_box)
+        self.lbl_update_progress_status = QLabel("Подготовка к скачиванию...")
+        prog_layout.addWidget(self.lbl_update_progress_status)
+        self.update_tab_progress_bar = QProgressBar()
+        self.update_tab_progress_bar.setRange(0, 100)
+        self.update_tab_progress_bar.setValue(0)
+        prog_layout.addWidget(self.update_tab_progress_bar)
+        self.update_tab_progress_box.setVisible(False)
+        layout.addWidget(self.update_tab_progress_box)
+
+        # 4. Кнопки управления
+        btns_layout = QHBoxLayout()
+        btns_layout.setSpacing(12)
+
+        self.btn_install_update = QPushButton("⬇️ Скачать и установить обновление")
+        self.btn_install_update.setEnabled(False)
+        self.btn_install_update.setMinimumHeight(40)
+        self.btn_install_update.setStyleSheet(
+            "QPushButton { background-color: #2b8a3e; color: white; font-weight: bold; "
+            "padding: 8px 18px; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #2f9e44; }"
+            "QPushButton:disabled { background-color: #adb5bd; color: #f8f9fa; }"
+        )
+        self.btn_install_update.setToolTip(
+            "Кнопка станет активной, когда на GitHub появится более новая версия программы"
+        )
+        self.btn_install_update.clicked.connect(self._start_pending_update)
+        btns_layout.addWidget(self.btn_install_update)
+
+        self.btn_check_update_tab = QPushButton("🔍 Проверить наличие обновлений")
+        self.btn_check_update_tab.setMinimumHeight(40)
+        self.btn_check_update_tab.setStyleSheet(
+            "QPushButton { background-color: #1971c2; color: white; font-weight: bold; "
+            "padding: 8px 16px; border-radius: 6px; }"
+            "QPushButton:hover { background-color: #1c7ed6; }"
+        )
+        self.btn_check_update_tab.clicked.connect(lambda: self._check_for_updates(manual=True))
+        btns_layout.addWidget(self.btn_check_update_tab)
+
+        self.btn_open_github_releases = QPushButton("🌐 Открыть страницу релизов на GitHub")
+        self.btn_open_github_releases.setMinimumHeight(40)
+        self.btn_open_github_releases.clicked.connect(self._open_github_releases_page)
+        btns_layout.addWidget(self.btn_open_github_releases)
+
+        btns_layout.addStretch()
+        layout.addLayout(btns_layout)
+
+        return tab
+
+    def _default_release_notes_html(self) -> str:
+        """Описание текущей версии по умолчанию (до получения ответа с сервера)."""
+        return (
+            f"<h3 style='margin-top:0; color:#1864ab;'>НейроКрылья v{html.escape(APP_VERSION)}</h3>"
+            "<p><b>Основные возможности текущей версии:</b></p>"
+            "<ul>"
+            "<li>📊 <b>3 варианта визуала графиков:</b> включая точный вид 1:1 как в Excel «Порода по крыльям в. 2.5» "
+            "(сводная матрица 2×2 и вариационные кривые по шкалам Карташёва).</li>"
+            "<li>🏆 <b>Поиск лучших пчёл семьи:</b> трёхэтапная фильтрация ядра породы (CI → DsA → HI) по алгоритму «Лучшая пчела».</li>"
+            "<li>🐝 <b>Режимы спаривания матки:</b> переключатель «Чистопородная / Свободноспаренная (±15%)».</li>"
+            "<li>🎯 <b>Точный прицел и навигация:</b> контрастный курсор с открытым центром 25×25 px, постановка точек по Пробелу/Enter и миникарта скана <code>[M]</code>.</li>"
+            "<li>🔄 <b>Автообновление с GitHub Releases:</b> проверка новых версий при запуске и обновление в 1 клик.</li>"
+            "</ul>"
+        )
+
+    def _open_github_releases_page(self):
+        """Открыть страницу релизов на GitHub в браузере."""
+        url = APP_GITHUB_RELEASES_HTML_URL
+        if self._update_info and self._update_info.get("html_url"):
+            url = self._update_info["html_url"]
+        QDesktopServices.openUrl(QUrl(url))
+
+    def _refresh_update_tab_ui(self, info: Optional[dict]):
+        """Обновить содержимое вкладки «🔄 Обновление» по данным ответа сервера."""
+        if not hasattr(self, "update_tab") or self.update_tab is None:
+            return
+
+        self.lbl_update_current_ver.setText(
+            f"<b>Текущая установленная версия:</b> v{html.escape(APP_VERSION)}"
+        )
+
+        if not info:
+            return
+
+        remote_ver = str(info.get("version") or APP_VERSION).lstrip("vV")
+        pub_date = info.get("published_at") or "—"
+        source_label = (
+            f"GitHub Releases (<code>{html.escape(APP_GITHUB_REPO)}</code>)"
+            if info.get("source") == "github"
+            else "Сервер обновлений НейроКрылья"
+        )
+        self.lbl_update_source_date.setText(
+            f"<b>Дата публикации:</b> {html.escape(pub_date)} &nbsp;|&nbsp; "
+            f"<b>Источник:</b> {source_label}"
+        )
+
+        if info.get("update_available"):
+            self.lbl_update_latest_ver.setText(
+                f"<b>Последняя доступная версия на GitHub:</b> "
+                f"<span style='color:#d9480f; font-weight:bold;'>🔥 Доступна новая версия v{html.escape(remote_ver)}!</span>"
+            )
+            self.btn_install_update.setEnabled(True)
+            self.btn_install_update.setText(f"⬇️ Скачать и установить v{remote_ver}")
+            self.btn_install_update.setToolTip(f"Скачать и установить обновление v{remote_ver}")
+        else:
+            self.lbl_update_latest_ver.setText(
+                f"<b>Последняя доступная версия на GitHub:</b> v{html.escape(remote_ver)} — "
+                f"<span style='color:#2b8a3e; font-weight:bold;'>У вас установлена самая последняя версия ✅</span>"
+            )
+            self.btn_install_update.setEnabled(False)
+            self.btn_install_update.setText("⬇️ Скачать и установить обновление")
+            self.btn_install_update.setToolTip("У вас уже установлена самая последняя версия программы")
+
+        # Формируем HTML «Что нового в версии»
+        headline = info.get("headline") or f"НейроКрылья v{remote_ver}"
+        notes = info.get("notes") or []
+        html_parts = [f"<h3 style='margin-top:0; color:#1864ab;'>{html.escape(headline)}</h3>"]
+        if pub_date and pub_date != "—":
+            html_parts.append(f"<p style='color:#495057;'><b>Дата релиза:</b> {html.escape(pub_date)}</p>")
+        if notes:
+            html_parts.append("<p><b>Список изменений:</b></p><ul>")
+            for note in notes:
+                html_parts.append(f"<li>{html.escape(str(note))}</li>")
+            html_parts.append("</ul>")
+        elif info.get("body"):
+            html_parts.append(f"<pre style='white-space:pre-wrap;'>{html.escape(info['body'])}</pre>")
+        else:
+            html_parts.append(self._default_release_notes_html())
+        self.txt_update_notes.setHtml("".join(html_parts))
+
     def _auto_check_for_updates(self):
-        if getattr(sys, "frozen", False):
+        if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
             self._check_for_updates(manual=False)
 
     def _check_for_updates(self, manual: bool = False):
@@ -2455,7 +2635,11 @@ class MainWindow(QMainWindow):
                 self.statusBar().showMessage("Проверка обновлений уже выполняется.", 3000)
             return
 
-        self._update_check_worker = UpdateCheckWorker(APP_UPDATE_FEED_URL, APP_VERSION)
+        if hasattr(self, "btn_check_update_tab"):
+            self.btn_check_update_tab.setEnabled(False)
+            self.btn_check_update_tab.setText("⏳ Проверка обновлений...")
+
+        self._update_check_worker = UpdateCheckWorker(APP_GITHUB_RELEASES_API_URL, APP_VERSION)
         self._update_check_worker.finished.connect(
             lambda info: self._on_update_check_finished(info, manual)
         )
@@ -2465,32 +2649,46 @@ class MainWindow(QMainWindow):
         self._update_check_worker.start()
 
         if manual:
-            self.statusBar().showMessage("Проверяю обновления...", 3000)
+            self.statusBar().showMessage("Проверяю обновления на GitHub Releases...", 3000)
 
     def _on_update_check_finished(self, info: dict, manual: bool):
+        if hasattr(self, "btn_check_update_tab"):
+            self.btn_check_update_tab.setEnabled(True)
+            self.btn_check_update_tab.setText("🔍 Проверить наличие обновлений")
+
         self._update_info = info if info.get("update_available") else None
+        self._refresh_update_tab_ui(info)
+
+        tab_idx = self.tab_widget.indexOf(self.update_tab) if hasattr(self, "update_tab") else -1
         if info.get("update_available"):
+            if tab_idx >= 0:
+                self.tab_widget.setTabText(tab_idx, "🔄 Обновление 🔴")
             self._show_update_banner(info)
             self.statusBar().showMessage(
-                f"Доступно обновление {info['version']} (у вас {APP_VERSION}).",
-                5000,
+                f"Доступно обновление v{info['version']} (у вас v{APP_VERSION}).",
+                6000,
             )
-            if manual:
+            if manual or (os.environ.get("QT_QPA_PLATFORM") != "offscreen" and self.isVisible()):
                 self._prompt_update(info)
         else:
+            if tab_idx >= 0:
+                self.tab_widget.setTabText(tab_idx, "🔄 Обновление")
             self._hide_update_banner()
             if manual:
                 QMessageBox.information(
                     self,
                     "Обновление",
-                    f"У вас уже актуальная версия {APP_VERSION}.",
+                    f"У вас уже установлена самая последняя версия v{APP_VERSION} ✅",
                 )
             else:
-                self.statusBar().showMessage("Обновлений не найдено.", 3000)
+                self.statusBar().showMessage("Обновлений не найдено (установлена последняя версия).", 3000)
 
         self._update_check_worker = None
 
     def _on_update_check_error(self, message: str, manual: bool):
+        if hasattr(self, "btn_check_update_tab"):
+            self.btn_check_update_tab.setEnabled(True)
+            self.btn_check_update_tab.setText("🔍 Проверить наличие обновлений")
         self._update_check_worker = None
         if manual:
             QMessageBox.warning(
@@ -2504,7 +2702,8 @@ class MainWindow(QMainWindow):
     def _show_update_banner(self, info: dict):
         published_at = f", опубликовано {info['published_at']}" if info.get("published_at") else ""
         self.lbl_update_banner.setText(
-            f"Доступна новая версия {info['version']} (у вас {APP_VERSION}{published_at})."
+            f"🔥 Доступна новая версия v{info['version']} (у вас v{APP_VERSION}{published_at}). "
+            f"Нажмите «Обновить» или откройте вкладку «🔄 Обновление 🔴»."
         )
         self.update_banner.setVisible(True)
 
@@ -2516,14 +2715,22 @@ class MainWindow(QMainWindow):
             self._begin_update_download(self._update_info)
 
     def _prompt_update(self, info: dict):
-        parts = [f"Доступна версия {info['version']} (у вас {APP_VERSION})."]
+        ver = str(info.get("version") or "").lstrip("vV")
+        parts = [f"Появилась новая версия v{ver} (у вас установлена v{APP_VERSION})!"]
+        if info.get("published_at"):
+            parts.append(f"Дата публикации: {info['published_at']}")
         if info.get("headline"):
             parts.append("")
             parts.append(info["headline"])
         if info.get("notes"):
             parts.append("")
             parts.append("Что изменилось:")
-            parts.extend(f"- {note}" for note in info["notes"])
+            parts.extend(f"• {note}" for note in info["notes"][:12])
+        parts.append("")
+        parts.append(
+            "Обновить программу сейчас?\n"
+            "(Если нажать «Нет», вы сможете обновиться в любой момент во вкладке «🔄 Обновление»)"
+        )
 
         reply = QMessageBox.question(
             self,
@@ -2550,8 +2757,8 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Обновление",
-                "Автообновление работает в установленной Windows-версии. "
-                "Ссылка на загрузку открыта в браузере.",
+                "Автоматическая замена .exe работает в установленной Windows-версии.\n"
+                "Ссылка на загрузку новой версии открыта в браузере.",
             )
             return
 
@@ -2560,7 +2767,7 @@ class MainWindow(QMainWindow):
             QMessageBox.information(
                 self,
                 "Обновление",
-                "Для этой версии доступна страница загрузки. Я открыл ее в браузере.",
+                "Для этой версии доступна страница загрузки на GitHub. Она открыта в браузере.",
             )
             return
 
@@ -2575,6 +2782,12 @@ class MainWindow(QMainWindow):
         file_name = Path(urlparse(download_url).path).name or Path(sys.executable).name
         download_dir = Path(tempfile.gettempdir()) / "neurowings-updates"
         destination = download_dir / file_name
+
+        if hasattr(self, "update_tab_progress_box"):
+            self.update_tab_progress_box.setVisible(True)
+            self.update_tab_progress_bar.setRange(0, 0)
+            self.lbl_update_progress_status.setText("Скачивание обновления с GitHub Releases...")
+            self.btn_install_update.setEnabled(False)
 
         self._update_progress_dialog = QProgressDialog("Скачивание обновления...", None, 0, 0, self)
         self._update_progress_dialog.setWindowTitle("Обновление")
@@ -2591,6 +2804,21 @@ class MainWindow(QMainWindow):
         self._update_download_worker.start()
 
     def _on_update_download_progress(self, current: int, total: int):
+        if hasattr(self, "update_tab_progress_box"):
+            self.update_tab_progress_box.setVisible(True)
+            if total > 0:
+                pct = int(min(100, round(current * 100.0 / total)))
+                self.update_tab_progress_bar.setRange(0, 100)
+                self.update_tab_progress_bar.setValue(pct)
+                self.lbl_update_progress_status.setText(
+                    f"Скачивание обновления: {current / 1024 / 1024:.1f} / {total / 1024 / 1024:.1f} МБ ({pct}%)"
+                )
+            else:
+                self.update_tab_progress_bar.setRange(0, 0)
+                self.lbl_update_progress_status.setText(
+                    f"Скачивание обновления: {current / 1024 / 1024:.1f} МБ..."
+                )
+
         if not self._update_progress_dialog:
             return
 
@@ -2608,14 +2836,20 @@ class MainWindow(QMainWindow):
             self._update_progress_dialog.close()
             self._update_progress_dialog = None
 
+        if hasattr(self, "update_tab_progress_box"):
+            self.update_tab_progress_bar.setRange(0, 100)
+            self.update_tab_progress_bar.setValue(100)
+            self.lbl_update_progress_status.setText("Загрузка завершена (100%). Готово к установке!")
+            self.btn_install_update.setEnabled(True)
+
         self._update_download_worker = None
         downloaded_path = Path(path_str)
 
         reply = QMessageBox.question(
             self,
             "Обновление скачано",
-            f"Версия {info['version']} скачана.\n\n"
-            "Сейчас программа закроется, заменит текущий EXE и запустится заново.\n\n"
+            f"Версия v{info['version']} успешно скачана.\n\n"
+            "Сейчас программа закроется, заменит текущий EXE и автоматически запустится заново.\n\n"
             "Применить обновление сейчас?",
             QMessageBox.Yes | QMessageBox.No,
             QMessageBox.Yes,
@@ -2627,6 +2861,11 @@ class MainWindow(QMainWindow):
         if self._update_progress_dialog:
             self._update_progress_dialog.close()
             self._update_progress_dialog = None
+
+        if hasattr(self, "update_tab_progress_box"):
+            self.update_tab_progress_box.setVisible(False)
+            if self._update_info and self._update_info.get("update_available"):
+                self.btn_install_update.setEnabled(True)
 
         self._update_download_worker = None
         QMessageBox.warning(
@@ -2640,12 +2879,13 @@ class MainWindow(QMainWindow):
             return
 
         try:
+            target_exe = Path(sys.executable)
             script_path = create_windows_update_script(
                 downloaded_path,
-                Path(sys.executable),
+                target_exe,
                 os.getpid(),
             )
-            launch_windows_update_script(script_path)
+            launch_windows_update_script(script_path, target_exe)
         except Exception as exc:
             QMessageBox.critical(
                 self,

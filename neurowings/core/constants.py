@@ -17,6 +17,9 @@ APP_AUTHOR = "Дмитрий Дубровский"
 APP_MAX_URL = "https://max.ru/u/f9LHodD0cOIbZcReW1B_n2lDumCww_8mo2-Kjv_3dok65ZPHlJWUNkq-MVo"
 APP_TELEGRAM_LABEL = "@NeuroWings_bee"
 APP_TELEGRAM_URL = "https://t.me/NeuroWings_bee"
+APP_GITHUB_REPO = "fokper4-max/neurowings"
+APP_GITHUB_RELEASES_API_URL = "https://api.github.com/repos/fokper4-max/neurowings/releases/latest"
+APP_GITHUB_RELEASES_HTML_URL = "https://github.com/fokper4-max/neurowings/releases"
 APP_UPDATE_FEED_URL = "https://193-124-117-175.nip.io/downloads/neurowings/update-feed.json"
 NUM_POINTS = 8
 

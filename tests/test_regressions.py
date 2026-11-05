@@ -576,5 +576,184 @@ class Regression(unittest.TestCase):
   self.assertTrue(hasattr(win.view, "_minimap") and win.view._minimap is not None)
   win.close()
 
+ def test_github_releases_updater_and_update_tab(self):
+  """Проверка парсинга GitHub Releases API JSON, скачивания с/без SHA256, запуска скрипта и вкладки «🔄 Обновление»."""
+  import hashlib
+  import io
+  import json
+  from unittest.mock import patch, MagicMock
+  from PyQt5.QtWidgets import QMessageBox
+  from neurowings.ui.main_window import MainWindow
+  from neurowings.core.update_manager import (
+   normalize_update_info,
+   fetch_update_feed,
+   download_update,
+   launch_windows_update_script,
+   is_newer_version,
+   UpdateError,
+  )
+
+  # 1. Парсинг ответа GitHub Releases API (с полем digest у ассета .exe и markdown body)
+  sample_sha = "a077e85583a22be9fb8348fb8c635bd22d2deff705fd355fa35fa675fa0b7db8"
+  gh_payload = {
+   "url": "https://api.github.com/repos/fokper4-max/neurowings/releases/999",
+   "html_url": "https://github.com/fokper4-max/neurowings/releases/tag/v2.3.0",
+   "tag_name": "v2.3.0",
+   "name": "НейроКрылья v2.3.0 — Автообновление с GitHub",
+   "published_at": "2026-11-05T18:30:00Z",
+   "body": "### Что нового в v2.3.0\n- **Автообновление** с GitHub Releases\n- Вкладка «🔄 Обновление» в главном окне\n",
+   "assets": [
+    {
+     "name": "NeuroWings-2.3.0.exe",
+     "size": 150000000,
+     "browser_download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.3.0/NeuroWings-2.3.0.exe",
+     "digest": f"sha256:{sample_sha}",
+    }
+   ],
+  }
+  info = normalize_update_info(gh_payload, "https://api.github.com/repos/fokper4-max/neurowings/releases/latest")
+  self.assertEqual(info["version"], "2.3.0")
+  self.assertTrue(is_newer_version(info["version"], "2.2.0"))
+  self.assertEqual(
+   info["download_url"],
+   "https://github.com/fokper4-max/neurowings/releases/download/v2.3.0/NeuroWings-2.3.0.exe",
+  )
+  self.assertEqual(info["sha256"], sample_sha)
+  self.assertEqual(info["published_at"], "2026-11-05")
+  self.assertEqual(info["source"], "github")
+  self.assertIn("Автообновление с GitHub Releases", info["notes"])
+
+  # 2. Извлечение SHA256 из текста body релиза, если поле digest отсутствует
+  gh_payload_body_sha = {
+   "tag_name": "v2.3.1",
+   "body": f"- Исправления ошибок\nSHA256: `{sample_sha.upper()}`",
+   "assets": [
+    {
+     "name": "NeuroWings-2.3.1.exe",
+     "browser_download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.3.1/NeuroWings-2.3.1.exe",
+    }
+   ],
+  }
+  info_body_sha = normalize_update_info(gh_payload_body_sha)
+  self.assertEqual(info_body_sha["version"], "2.3.1")
+  self.assertEqual(info_body_sha["sha256"], sample_sha)
+
+  # 3. fetch_update_feed пробует GitHub API и при ошибке переключается на резервный update-feed.json
+  fallback_payload = {
+   "version": "2.2.5",
+   "url": "https://193-124-117-175.nip.io/downloads/neurowings/NeuroWings-2.2.5.exe",
+   "sha256": sample_sha,
+   "notes": ["Резервный канал обновлений"],
+  }
+  call_urls = []
+  def fake_urlopen(req, timeout=8, context=None):
+   url = req.full_url if hasattr(req, "full_url") else str(req)
+   call_urls.append(url)
+   if "api.github.com" in url:
+    raise OSError("GitHub API temporarily unreachable")
+   resp = MagicMock()
+   resp.read.return_value = json.dumps(fallback_payload).encode("utf-8")
+   resp.__enter__.return_value = resp
+   resp.__exit__.return_value = False
+   return resp
+
+  with patch("neurowings.core.update_manager.urlopen", side_effect=fake_urlopen):
+   fb_info = fetch_update_feed("")
+  self.assertEqual(fb_info["version"], "2.2.5")
+  self.assertGreaterEqual(len(call_urls), 2)
+  self.assertIn("api.github.com", call_urls[0])
+
+  # 4. download_update: проверка с SHA256 и fallback для GitHub без SHA256 (проверка MZ + размера > 1 МБ)
+  with tempfile.TemporaryDirectory() as t:
+   fake_exe_bytes = b"MZ" + (b"\x90" * (1_050_000))
+   fake_sha = hashlib.sha256(fake_exe_bytes).hexdigest()
+
+   def fake_dl_open(req, timeout=30, context=None):
+    bio = io.BytesIO(fake_exe_bytes)
+    bio.headers = {"Content-Length": str(len(fake_exe_bytes))}
+    bio.__enter__ = lambda s=bio: s
+    bio.__exit__ = lambda *a: False
+    return bio
+
+   dest1 = Path(t) / "NeuroWings-sha.exe"
+   with patch("neurowings.core.update_manager.urlopen", side_effect=fake_dl_open):
+    out1 = download_update(
+     {"download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.3.0/NW.exe", "sha256": fake_sha},
+     dest1,
+    )
+   self.assertTrue(out1.exists())
+   self.assertEqual(out1.stat().st_size, len(fake_exe_bytes))
+
+   # Скачивание с GitHub без SHA256 проходит благодаря проверке PE-заголовка MZ и размера > 1 МБ
+   dest2 = Path(t) / "NeuroWings-nosha.exe"
+   with patch("neurowings.core.update_manager.urlopen", side_effect=fake_dl_open):
+    out2 = download_update(
+     {"download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.3.0/NW.exe", "sha256": ""},
+     dest2,
+    )
+   self.assertTrue(out2.exists())
+
+   # А со стороннего домена без SHA256 — блокируется
+   with self.assertRaises(UpdateError):
+    download_update(
+     {"download_url": "https://example.com/NW.exe", "sha256": ""},
+     Path(t) / "bad.exe",
+    )
+
+   # 5. launch_windows_update_script: прямой запуск без RunAs при праве записи и fallback с RunAs при запрете
+   script_p = Path(t) / "apply_update.ps1"
+   script_p.write_text("# test", encoding="utf-8")
+   target_exe = Path(t) / "NeuroWings.exe"
+   with patch("neurowings.core.update_manager.os.access", return_value=True), \
+        patch("neurowings.core.update_manager.subprocess.Popen") as mock_popen, \
+        patch("neurowings.core.update_manager.subprocess.run") as mock_run:
+    launch_windows_update_script(script_p, target_exe)
+    self.assertTrue(mock_popen.called)
+    self.assertFalse(mock_run.called)
+
+   with patch("neurowings.core.update_manager.os.access", return_value=False), \
+        patch("neurowings.core.update_manager.subprocess.Popen") as mock_popen, \
+        patch("neurowings.core.update_manager.subprocess.run") as mock_run:
+    launch_windows_update_script(script_p, target_exe)
+    self.assertFalse(mock_popen.called)
+    self.assertTrue(mock_run.called)
+
+  # 6. Проверка вкладки «🔄 Обновление» и всплывающего окна Да/Нет в MainWindow
+  with patch.object(MainWindow, "_load_models"), patch.object(MainWindow, "_load_gpt_config"):
+   win = MainWindow()
+
+  tab_idx = win.tab_widget.indexOf(win.update_tab)
+  self.assertGreaterEqual(tab_idx, 0)
+  self.assertEqual(win.tab_widget.tabText(tab_idx), "🔄 Обновление")
+  self.assertFalse(win.btn_install_update.isEnabled())
+
+  # Симулируем приход новой версии v2.3.0 и ответ «Нет» во всплывающем окне (пользователь решил обновиться позже)
+  info_new = dict(info)
+  info_new["update_available"] = True
+  with patch.object(QMessageBox, "question", return_value=QMessageBox.No) as mock_q:
+   win._on_update_check_finished(info_new, manual=True)
+   self.assertTrue(mock_q.called)
+
+  # Вкладка обновилась, получила индикатор 🔴, кнопка скачивания стала активной!
+  self.assertEqual(win.tab_widget.tabText(tab_idx), "🔄 Обновление 🔴")
+  self.assertTrue(win.btn_install_update.isEnabled())
+  self.assertIn("2.3.0", win.lbl_update_latest_ver.text())
+  self.assertIn("Автообновление с GitHub Releases", win.txt_update_notes.toPlainText())
+
+  # Проверка прогресс-бара на вкладке «🔄 Обновление»
+  win.update_tab_progress_box.setVisible(True)
+  win._on_update_download_progress(50 * 1024 * 1024, 100 * 1024 * 1024)
+  self.assertEqual(win.update_tab_progress_bar.value(), 50)
+  self.assertIn("50%", win.lbl_update_progress_status.text())
+
+  # Симулируем проверку, когда установлена актуальная версия
+  info_same = dict(info)
+  info_same["version"] = "2.2.0"
+  info_same["update_available"] = False
+  win._on_update_check_finished(info_same, manual=False)
+  self.assertEqual(win.tab_widget.tabText(tab_idx), "🔄 Обновление")
+  self.assertFalse(win.btn_install_update.isEnabled())
+  win.close()
+
 if __name__=='__main__':
  unittest.main()
