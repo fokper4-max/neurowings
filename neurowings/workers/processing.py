@@ -264,10 +264,13 @@ class ProcessingWorker(QThread):
 
             yolo_points = [(float(ensemble_xy[i, 0]), float(ensemble_xy[i, 1])) for i in range(8)]
             yolo_wing_points = [yolo_points[YOLO_TO_WINGSDIG[i]] for i in range(8)]
+            calibrated_pts = cls._apply_kartashov_vein_axis_calibration(yolo_wing_points)
+            snapped_pts = [(float(round(pt[0])), float(round(pt[1]))) for pt in calibrated_pts]
+            snapped_yolo = [(float(round(pt[0])), float(round(pt[1]))) for pt in yolo_wing_points]
             wing = Wing(
-                points=[WingPoint(x=pt[0], y=pt[1]) for pt in yolo_wing_points],
+                points=[WingPoint(x=pt[0], y=pt[1]) for pt in snapped_pts],
                 bbox=BBox(x1, y1, x2, y2),
-                points_yolo=[WingPoint(x=pt[0], y=pt[1]) for pt in yolo_wing_points],
+                points_yolo=[WingPoint(x=pt[0], y=pt[1]) for pt in snapped_yolo],
                 point_sources=['yolo'] * 8,
             )
             wing.analyze(image_height=h, image_width=w)
@@ -509,7 +512,19 @@ class ProcessingWorker(QThread):
 
                                         final_points = []
                                         for idx in range(8):
-                                            if idx == 5 and self.model_stage2 is not None:
+                                            if idx == 3 and self.model_stage2 is not None:
+                                                # Для точки 4 (развилка кубитальной/возвратной жилок) portable-модель
+                                                # даёт выбросы вправо до +12.5 px; используем стабилизированный ансамбль
+                                                # Stage1 + YOLO с радиальным ограничением 7.0 px от YOLO.
+                                                yx, yy = yolo_wing_points[idx]
+                                                s1x, s1y = mac_stage1_wing_points[idx]
+                                                dx_s1, dy_s1 = s1x - yx, s1y - yy
+                                                dist_s1 = float(np.hypot(dx_s1, dy_s1))
+                                                if dist_s1 > 7.0 and dist_s1 > 1e-6:
+                                                    s1x = yx + dx_s1 * (7.0 / dist_s1)
+                                                    s1y = yy + dy_s1 * (7.0 / dist_s1)
+                                                cand = (0.65 * s1x + 0.35 * yx, 0.65 * s1y + 0.35 * yy)
+                                            elif idx == 5 and self.model_stage2 is not None:
                                                 cand = mac_stage1_wing_points[idx]
                                             elif BEST_PIPELINE[idx] == 'portable' and self.model_stage2_portable is not None:
                                                 cand = portable_wing_points[idx]
@@ -523,6 +538,13 @@ class ProcessingWorker(QThread):
 
                                         if has_refiners:
                                             final_points = self._apply_kartashov_vein_axis_calibration(final_points)
+                                        else:
+                                            yolo_wing_points = self._apply_kartashov_vein_axis_calibration(yolo_wing_points)
+
+                                        # Округление до целых пикселей для 100% сквозной синхронизации с tpsDig2 и Excel Карташёва в. 2.5
+                                        final_points = [(float(round(pt[0])), float(round(pt[1]))) for pt in final_points]
+                                        yolo_wing_points = [(float(round(pt[0])), float(round(pt[1]))) for pt in yolo_wing_points]
+                                        mac_stage1_wing_points = [(float(round(pt[0])), float(round(pt[1]))) for pt in mac_stage1_wing_points]
 
                                         active_pts = final_points if has_refiners else yolo_wing_points
                                         active_src = 'stage2' if has_refiners else 'yolo'
@@ -648,16 +670,16 @@ class ProcessingWorker(QThread):
         pts: List[Tuple[float, float]]
     ) -> List[Tuple[float, float]]:
         """
-        Масштабно- и поворотно-инвариантная геометрическая доводка точек 3, 4 и 6
+        Масштабно- и поворотно-инвариантная геометрическая доводка точек 1–8
         на пересечение осевых линий жилок согласно Инструкции В.А. Карташева (Рис. 15, стр. 13).
 
-        В острых Y-образных развилках (точки 3 и 4) обучающая разметка нейросети ставила точку
-        на внутренний клин слияния жилок, тогда как методика Карташева / tpsDig2 требует
-        пересечения центральных осевых линий двух сходящихся жилок.
+        В острых Y-образных развилках (точки 3 и 4) и Т-образных сочленениях (точки 5, 6, 7, 8)
+        обучающая разметка ставила точки с систематическим смещением к внутреннему краю жилки,
+        тогда как методика Карташева / tpsDig2 требует пересечения центральных осевых линий жилок.
         """
         if len(pts) != 8:
             return pts
-        out = [ (float(x), float(y)) for x, y in pts ]
+        out = [(float(x), float(y)) for x, y in pts]
         p1x, p1y = out[0]
         p2x, p2y = out[1]
         span = float(np.hypot(p2x - p1x, p2y - p1y))
@@ -669,6 +691,7 @@ class ProcessingWorker(QThread):
         p5x, p5y = out[4]
         p6x, p6y = out[5]
         p7x, p7y = out[6]
+        p8x, p8y = out[7]
 
         # Единичный вектор вдоль жилки P4 -> P3
         v43x, v43y = p3x - p4x, p3y - p4y
@@ -700,19 +723,37 @@ class ProcessingWorker(QThread):
         if nb > 1e-3:
             bx /= nb
             by /= nb
-            shift_p4 = 0.0172 * span
+            shift_p4 = 0.0225 * span
             out[3] = (p4x + shift_p4 * bx, p4y + shift_p4 * by)
 
         # Проекция точки 3 вдоль оси радиальной жилки P4 -> P3 на пересечение осей (Рис. 15)
-        shift_p3 = 0.0088 * span
+        shift_p3 = 0.0098 * span
         out[2] = (p3x + shift_p3 * u43x, p3y + shift_p3 * u43y)
+
+        # Компенсация увода точки 5 влево-вниз вдоль жилки P5 -> P8
+        out[4] = (
+            p5x + 0.0004 * span * u12x - 0.0019 * span * n12x,
+            p5y + 0.0004 * span * u12y - 0.0019 * span * n12y,
+        )
 
         # Мягкая компенсация точки 6 вдоль отрезка кубитальной жилки P6 -> P7
         v67x, v67y = p7x - p6x, p7y - p6y
         n67 = float(np.hypot(v67x, v67y))
         if n67 > 1e-3:
-            shift_p6 = 0.0020 * span
+            shift_p6 = 0.0026 * span
             out[5] = (p6x + shift_p6 * (v67x / n67), p6y + shift_p6 * (v67y / n67))
+
+        # Компенсация увода точки 7 вправо-вверх на косой кубитальной жилке
+        out[6] = (
+            p7x + 0.0002 * span * u12x + 0.0015 * span * n12x,
+            p7y + 0.0002 * span * u12y + 0.0015 * span * n12y,
+        )
+
+        # Точная центровка точки 8 (перекрестье дискоидального смещения DsA)
+        out[7] = (
+            p8x - 0.0012 * span * u12x - 0.0022 * span * n12x,
+            p8y - 0.0012 * span * u12y - 0.0022 * span * n12y,
+        )
 
         return out
 

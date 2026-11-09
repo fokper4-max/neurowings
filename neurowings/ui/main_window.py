@@ -1229,6 +1229,7 @@ class MainWindow(QMainWindow):
 
             self.current_image.is_modified = True
             self._load_current_image()
+            self._auto_save_tps(self.current_image)
             self.statusBar().showMessage(
                 f"Изображение {img_path.name} {label_ru}. Нажмите «⚡ Обработать» для распознавания крыльев."
             )
@@ -1310,6 +1311,7 @@ class MainWindow(QMainWindow):
 
         self.current_image.is_modified = True
         self.current_image.analyze_all_wings()
+        self._auto_save_tps(self.current_image)
         self._update_display()
         self._update_analysis_widget()
         self._update_interpretation_widgets()
@@ -1340,6 +1342,7 @@ class MainWindow(QMainWindow):
                         wing.point_sources[idx] = model_type
             img_data.is_modified = True
             img_data.analyze_all_wings()
+            self._auto_save_tps(img_data)
 
         if self.current_image:
             self._update_display()
@@ -1374,6 +1377,7 @@ class MainWindow(QMainWindow):
 
         self.current_image.is_modified = True
         self.current_image.analyze_all_wings()
+        self._auto_save_tps(self.current_image)
         self._update_display()
         self._update_analysis_widget()
         self._update_interpretation_widgets()
@@ -1626,6 +1630,7 @@ class MainWindow(QMainWindow):
             wing = self.current_image.wings[row]
             if getattr(wing, "is_enabled", True) != new_enabled:
                 wing.is_enabled = new_enabled
+                self._auto_save_tps(self.current_image)
                 self._update_display()
                 self._update_analysis_widget()
                 self._update_interpretation_widgets()
@@ -1723,6 +1728,7 @@ class MainWindow(QMainWindow):
             image.wings = wings
             image.is_modified = True
             image.analyze_all_wings()
+            self._auto_save_tps(image)
             if image is self.current_image:
                 self._update_display()
                 self._update_analysis_widget()
@@ -1742,14 +1748,15 @@ class MainWindow(QMainWindow):
                 if not getattr(wing, 'points_gt', None) and any(s == 'gt' for s in wing.point_sources):
                     wing.points_gt = [WingPoint(p.x, p.y, p.is_manual) for p in wing.points]
 
-                wing.points[point_idx].x = x
-                wing.points[point_idx].y = y
+                wing.points[point_idx].x = float(round(x)) if math.isfinite(x) else x
+                wing.points[point_idx].y = float(round(y)) if math.isfinite(y) else y
                 wing.points[point_idx].is_manual = True
                 if point_idx < len(wing.point_sources):
                     wing.point_sources[point_idx] = 'manual'
                 self.current_image.is_modified = True
 
                 self.current_image.analyze_all_wings()
+                self._auto_save_tps(self.current_image)
                 self._update_display()
                 self._update_analysis_widget()
                 self._update_interpretation_widgets()
@@ -1779,7 +1786,7 @@ class MainWindow(QMainWindow):
             h_box = max(20.0, y2 - y1)
             from .wing_guide_widget import WingSchematicCanvas
             pts = [
-                WingPoint(x=x1 + nx * w_box, y=y1 + ny * h_box, is_manual=True)
+                WingPoint(x=float(round(x1 + nx * w_box)), y=float(round(y1 + ny * h_box)), is_manual=True)
                 for nx, ny in WingSchematicCanvas.NORM_POINTS
             ]
             wing = Wing(points=pts, bbox=bbox, point_sources=['manual'] * 8)
@@ -1792,6 +1799,7 @@ class MainWindow(QMainWindow):
         self.current_image.wings.append(wing)
         self.current_image.is_modified = True
         self.current_image.analyze_all_wings()
+        self._auto_save_tps(self.current_image)
         self.chk_bbox.setChecked(True)
         self._update_display()
         self._update_analysis_widget()
@@ -1819,6 +1827,7 @@ class MainWindow(QMainWindow):
 
         self.current_image.is_modified = True
         self.current_image.analyze_all_wings()
+        self._auto_save_tps(self.current_image)
         self._update_display()
         self._update_analysis_widget()
         self._update_interpretation_widgets()
@@ -1844,6 +1853,7 @@ class MainWindow(QMainWindow):
             wing.point_sources = rec.point_sources
             self.current_image.is_modified = True
             self.current_image.analyze_all_wings()
+            self._auto_save_tps(self.current_image)
             self._update_display()
             self._update_analysis_widget()
             self._update_interpretation_widgets()
@@ -1882,6 +1892,7 @@ class MainWindow(QMainWindow):
 
         self.current_image.is_modified = True
         self.current_image.analyze_all_wings()
+        self._auto_save_tps(self.current_image)
         self._update_display()
         self._update_analysis_widget()
         self._update_interpretation_widgets()
@@ -1929,6 +1940,7 @@ class MainWindow(QMainWindow):
                 del self.current_image.wings[wing_idx]
                 self.current_image.is_modified = True
                 self.current_image.analyze_all_wings()
+                self._auto_save_tps(self.current_image)
                 self._update_display()
                 self._update_analysis_widget()
                 self._update_interpretation_widgets()
@@ -1949,6 +1961,9 @@ class MainWindow(QMainWindow):
         if self.edit_mode != EditMode.ADD or not self.current_image:
             return
 
+        x = float(round(x)) if math.isfinite(x) else x
+        y = float(round(y)) if math.isfinite(y) else y
+
         # Проверяем, есть ли у крыльев удалённая точка (NaN), которую пользователь хочет поставить заново
         if not self.adding_points:
             for w_idx, wing in enumerate(self.current_image.wings):
@@ -1965,6 +1980,7 @@ class MainWindow(QMainWindow):
                             wing.point_sources[p_idx] = 'manual'
                         self.current_image.is_modified = True
                         self.current_image.analyze_all_wings()
+                        self._auto_save_tps(self.current_image)
                         self._update_display()
                         self._update_analysis_widget()
                         self._update_interpretation_widgets()
@@ -2001,6 +2017,7 @@ class MainWindow(QMainWindow):
             )
             self.current_image.wings.append(wing)
             self.current_image.is_modified = True
+            self._auto_save_tps(self.current_image)
             self._cancel_adding()
             self._update_display()
             self._update_analysis_widget()
@@ -2109,7 +2126,9 @@ class MainWindow(QMainWindow):
                         img_data.height = pixmap.height()
 
                 img_data.analyze_all_wings()
-                if not img_data.wings:
+                if img_data.wings:
+                    self._auto_save_tps(img_data)
+                else:
                     zero_wing_files.append(img_data.path.name)
 
         for i in range(self.file_list.count()):
@@ -2368,6 +2387,45 @@ class MainWindow(QMainWindow):
                     saved += 1
         self.statusBar().showMessage(f"💾 Сохранено файлов: {saved}")
 
+    @staticmethod
+    def _snap_wings_to_integer_pixels(img_data: ImageData):
+        """Округлить координаты точек крыльев до целых пикселей (1:1 совместимость с tpsDig2 и Excel в. 2.5)."""
+        if not img_data or not img_data.wings:
+            return
+        for wing in img_data.wings:
+            for attr in ("points", "points_yolo", "points_stage1", "points_stage2"):
+                pts_list = getattr(wing, attr, None)
+                if pts_list:
+                    for pt in pts_list:
+                        if math.isfinite(pt.x) and math.isfinite(pt.y):
+                            pt.x = float(round(pt.x))
+                            pt.y = float(round(pt.y))
+
+    def _auto_save_tps(self, img_data: Optional[ImageData] = None) -> bool:
+        """Автоматически синхронизировать .tps файл на диске после распознавания или редактирования точек."""
+        target = img_data or self.current_image
+        if not target or not target.path or not target.wings:
+            return False
+        tps_existing = self._find_tps_for_image(target.path)
+        if not target.path.exists() and tps_existing is None:
+            return False
+        enabled_wings = [w for w in target.wings if getattr(w, "is_enabled", True)]
+        if not enabled_wings:
+            return False
+        for w in enabled_wings:
+            pts = w.get_active_points()
+            if len(pts) != 8 or not all(math.isfinite(x) and math.isfinite(y) for x, y in pts):
+                return False
+        try:
+            self._snap_wings_to_integer_pixels(target)
+            tps_path = tps_existing or target.path.with_suffix('.tps')
+            save_tps_from_image(target, tps_path)
+            save_project(target, tps_path)
+            target.is_modified = False
+            return True
+        except Exception:
+            return False
+
     def _save_tps(self, img_data) -> bool:
         """Сохранить TPS файл в формате WingsDig с проверкой валидности координат"""
         if not img_data:
@@ -2402,7 +2460,9 @@ class MainWindow(QMainWindow):
                 return False
 
         try:
-            tps_path = img_data.path.with_suffix('.tps')
+            self._snap_wings_to_integer_pixels(img_data)
+            tps_existing = self._find_tps_for_image(img_data.path) if img_data.path else None
+            tps_path = tps_existing or img_data.path.with_suffix('.tps')
             save_tps_from_image(img_data, tps_path)
             save_project(img_data, tps_path)
             img_data.is_modified = False

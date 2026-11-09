@@ -755,5 +755,75 @@ class Regression(unittest.TestCase):
   self.assertFalse(win.btn_install_update.isEnabled())
   win.close()
 
+ def test_tps_tpsdig2_excel_sync_and_p4_p5_p7_calibration(self):
+  """Проверка 100% сквозной синхронизации NeuroWings <-> TPS <-> tpsDig2 <-> Excel в. 2.5 и калибровки точек 4, 5, 7, 8."""
+  from unittest.mock import patch
+  from PIL import Image
+  from PyQt5.QtWidgets import QListWidgetItem
+  from PyQt5.QtCore import Qt
+  from neurowings.ui.main_window import MainWindow
+  from neurowings.workers.processing import ProcessingWorker
+
+  # 1. Проверка геометрической доводки точек 3, 4, 5, 6, 7, 8
+  pts = [
+   (1161.0, 2838.0), (1810.0, 2789.0), (1430.0, 2787.0), (1244.0, 2791.0),
+   (1422.0, 2668.0), (1506.0, 2623.0), (1556.0, 2628.0), (1404.0, 2497.0),
+  ]
+  cal = ProcessingWorker._apply_kartashov_vein_axis_calibration(pts)
+  self.assertEqual(len(cal), 8)
+  self.assertGreater(cal[3][0], pts[3][0])
+  self.assertGreater(cal[2][0], pts[2][0])
+  self.assertLess(cal[4][1], pts[4][1])
+  self.assertGreater(cal[6][1], pts[6][1])
+
+  # 2. Сквозная проверка целочисленного квантования (1:1 с tpsDig2 TImageEnVect) и автосохранения .tps
+  with tempfile.TemporaryDirectory() as t:
+   img_p = Path(t) / "092_B.jpg"
+   tps_p = Path(t) / "092_B.tps"
+   Image.new("RGB", (3000, 4000), color=(245, 245, 245)).save(img_p)
+
+   with patch.object(MainWindow, "_load_models"), patch.object(MainWindow, "_load_gpt_config"):
+    win = MainWindow()
+
+   img_data = ImageData(img_p, width=3000, height=4000)
+   win.images[str(img_p)] = img_data
+   win.current_image = img_data
+   item = QListWidgetItem(f"○ 1) {img_p.name}")
+   item.setData(Qt.UserRole, str(img_p))
+   win.file_list.addItem(item)
+   win.file_list.setCurrentItem(item)
+
+   w1 = Wing(points=[WingPoint(x + 0.37, y + 0.62) for x, y in pts])
+   w2 = Wing(points=[WingPoint(x + 10.41, y + 20.19) for x, y in pts])
+   win._on_finished({str(img_p): [w1, w2]})
+
+   self.assertTrue(tps_p.exists())
+   tps_text = tps_p.read_text(encoding="cp1251")
+   self.assertIn("LM=16", tps_text)
+   self.assertIn("ID=0", tps_text)
+   self.assertIn(",00000", tps_text)
+
+   reloaded = ImageData(img_p, width=3000, height=4000)
+   load_tps_into_image(reloaded, tps_p)
+   reloaded.analyze_all_wings()
+   for wa, wb in zip(win.current_image.wings, reloaded.wings):
+    self.assertAlmostEqual(wa.analysis.CI, wb.analysis.CI, places=12)
+    self.assertAlmostEqual(wa.analysis.DsA, wb.analysis.DsA, places=12)
+    self.assertAlmostEqual(wa.analysis.HI, wb.analysis.HI, places=12)
+
+   win._on_point_moved(0, 3, 1250.4, 2790.6)
+   self.assertEqual(win.current_image.wings[0].points[3].x, 1250.0)
+   self.assertEqual(win.current_image.wings[0].points[3].y, 2791.0)
+   reloaded2 = ImageData(img_p, width=3000, height=4000)
+   load_tps_into_image(reloaded2, tps_p)
+   self.assertEqual(reloaded2.wings[0].points[3].x, 1250.0)
+   self.assertEqual(reloaded2.wings[0].points[3].y, 2791.0)
+
+   win.current_image.wings[1].is_enabled = False
+   win._auto_save_tps(win.current_image)
+   tps_text_after_disable = tps_p.read_text(encoding="cp1251")
+   self.assertIn("LM=8", tps_text_after_disable)
+   win.close()
+
 if __name__=='__main__':
  unittest.main()

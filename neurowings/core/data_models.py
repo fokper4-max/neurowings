@@ -122,10 +122,10 @@ class Wing:
             return
         
         # Преобразование координат из экранной системы в WingsDig формат для правильных расчетов
-        # В WingsDig/Excel: Y отсчитывается снизу, в экранной системе: Y отсчитывается сверху
+        # В WingsDig/tpsDig2/Excel: Y отсчитывается снизу, а координаты на холсте привязаны к целым пикселям
         if image_height is not None and image_height > 0:
-            # Конвертируем экранные координаты (Y сверху) в WingsDig координаты (Y снизу)
-            points_wingsdig = [(px, image_height - py) for px, py in points]
+            # Конвертируем экранные координаты (Y сверху) в целочисленные пиксели WingsDig/tpsDig2 (Y снизу)
+            points_wingsdig = [(float(round(px)), float(round(image_height - py))) for px, py in points]
             points = points_wingsdig
         
         indices = calculate_indices(points)
