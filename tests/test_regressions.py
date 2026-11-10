@@ -16,7 +16,9 @@ class Regression(unittest.TestCase):
  def test_atomic_unicode_precision_empty(self):
   with tempfile.TemporaryDirectory() as t:
    p=Path(t)/'data.tps';d=ImageData(Path('bee_🐝.jpg'),wings=[Wing(points=[WingPoint(i+.25,i+.75) for i in range(8)])],height=100,width=100)
-   save_tps_from_image(d,p);load_tps_into_image(d,p);self.assertEqual(d.wings[0].points[0].x,.25)
+   save_tps_from_image(d,p);load_tps_into_image(d,p);self.assertEqual(d.wings[0].points[0].x,0.0)
+   d=ImageData(Path('bee_🐝.jpg'),wings=[Wing(points=[WingPoint(i+.25,i+.75) for i in range(8)])],height=100,width=100)
+   save_tps_from_image(d,p,integer_pixels=False);load_tps_into_image(d,p);self.assertEqual(d.wings[0].points[0].x,.25)
    d.wings=[];save_tps_from_image(d,p);load_tps_into_image(d,p);self.assertEqual(d.wings,[])
  def test_bad_block(self):
   with tempfile.TemporaryDirectory() as t:
@@ -823,7 +825,45 @@ class Regression(unittest.TestCase):
    win._auto_save_tps(win.current_image)
    tps_text_after_disable = tps_p.read_text(encoding="cp1251")
    self.assertIn("LM=8", tps_text_after_disable)
+
+   # 3. Проверка авто-лечения старых битых .tps с дробными координатами и ID=1 (кейс Б.rar Руслана / Макрос3 Excel в. 2.5)
+   legacy_tps = Path(t) / "legacy_broken.tps"
+   legacy_img = Path(t) / "legacy_broken.jpg"
+   Image.new("RGB", (5462, 15403), color=(240, 240, 240)).save(legacy_img)
+   legacy_lines = ["LM=8"] + [f"{2251.37247 + k:.5f} {14787.50652 - k:.5f}".replace(".", ",") for k in range(8)] + [
+    f"IMAGE={legacy_img.name}", "ID=1"
+   ]
+   legacy_tps.write_bytes(("\r\n".join(legacy_lines) + "\r\n").encode("cp1251"))
+   self.assertTrue(win._tps_file_needs_excel_repair(legacy_tps))
+
+   legacy_data = ImageData(legacy_img)
+   win._load_tps_for_image(legacy_data, legacy_tps)
+   self.assertFalse(win._tps_file_needs_excel_repair(legacy_tps))
+   repaired_text = legacy_tps.read_text(encoding="cp1251")
+   self.assertIn("2251,00000 14788,00000", repaired_text)
+   self.assertIn("ID=0", repaired_text)
+   self.assertNotIn("ID=1", repaired_text)
    win.close()
+
+ def test_excel_roundup_score_and_onefile_updater_script(self):
+  """Проверка формулы 5 + ROUNDUP((ROUND(P,3)-100%)/10%, 0) как в Excel Анализ!D15 и цикла ожидания блокировки файла в PowerShell."""
+  from neurowings.core.colony_analysis import _excel_roundup_score
+  from neurowings.core.update_manager import create_windows_update_script
+  self.assertEqual(_excel_roundup_score(100.0), 5)
+  self.assertEqual(_excel_roundup_score(92.2), 4)
+  self.assertEqual(_excel_roundup_score(63.9), 1)
+  self.assertEqual(_excel_roundup_score(61.9), 1)
+  self.assertEqual(_excel_roundup_score(59.9), 0)
+  self.assertEqual(_excel_roundup_score(15.5), -4)
+  self.assertEqual(_excel_roundup_score(0.0), -5)
+
+  with tempfile.TemporaryDirectory() as t:
+   src = Path(t) / "NeuroWings-2.2.2.exe"
+   dst = Path(t) / "NeuroWings.exe"
+   ps1 = create_windows_update_script(src, dst, 99999)
+   ps1_text = ps1.read_text(encoding="utf-8-sig")
+   self.assertIn("for ($attempt = 1; $attempt -le 40; $attempt++)", ps1_text)
+   self.assertIn("Start-Sleep -Milliseconds 1200", ps1_text)
 
 if __name__=='__main__':
  unittest.main()

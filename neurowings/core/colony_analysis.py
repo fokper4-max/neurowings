@@ -142,11 +142,11 @@ def _compute_index_stats(values: List[float], abs_mean_for_cv: bool = True) -> I
         return IndexStats()
     mean = float(np.mean(clean))
     std = float(np.std(clean, ddof=1)) if len(clean) > 1 else 0.0
-    sem = float(std / math.sqrt(len(clean))) if clean else 0.0
-    denom = abs(mean) if abs_mean_for_cv else mean
-    # В Excel (Карташев в. 2.5, лист «Индексы» строки 103–104):
-    # СКО = ROUND(STDEV(...), 3), Квар = ROUND(СКО / МО, 3) * 100%
+    # В Excel (Карташев в. 2.5, лист «Индексы» строки 103–104 и лист «Анализ» строки 6–8):
+    # СКО = ROUND(STDEV(...), 3), SE = СКО / SQRT(N), Квар = ROUND(СКО / МО, 3) * 100%
     std_rounded = round(std, 3)
+    sem = float(std_rounded / math.sqrt(len(clean))) if clean else 0.0
+    denom = abs(mean) if abs_mean_for_cv else mean
     cv = float(round(abs(std_rounded / denom), 3) * 100.0) if denom != 0 else 0.0
     return IndexStats(
         values=clean,
@@ -160,13 +160,18 @@ def _compute_index_stats(values: List[float], abs_mean_for_cv: bool = True) -> I
 
 
 def _excel_roundup_score(id_pct: float) -> int:
-    """Баллы за вероятность соответствия породе по формуле Excel: 5 + ROUNDUP((P - 100%)/10%)."""
-    diff = (float(id_pct) - 100.0) / 10.0
-    if diff >= 0:
-        roundup_value = int(math.ceil(diff))
+    """Баллы за вероятность соответствия породе 1:1 по формуле Excel (Анализ!D15): 5 + ROUNDUP((ROUND(P,3) - 100%)/10%, 0)."""
+    # В Excel Анализ!C15: ROUND(P, 3) в долях (т.е. до 0.1% в процентах)
+    pct_rounded = round(float(id_pct), 1)
+    diff = (pct_rounded - 100.0) / 10.0
+    # В Excel функция ROUNDUP(x, 0) округляет ОТ НУЛЯ по модулю (напр. ROUNDUP(-8.45, 0) = -9)
+    if abs(diff) < 1e-12:
+        roundup_value = 0
+    elif diff > 0:
+        roundup_value = int(math.ceil(diff - 1e-12))
     else:
-        roundup_value = int(math.floor(diff))
-    return max(0, 5 + roundup_value)
+        roundup_value = -int(math.ceil(abs(diff) - 1e-12))
+    return 5 + roundup_value
 
 
 def _build_verdict(

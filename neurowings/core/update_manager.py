@@ -311,7 +311,7 @@ def download_update(info: dict, destination: Path, progress_callback=None, timeo
 
 
 def create_windows_update_script(downloaded_exe: Path, target_exe: Path, pid_to_wait: int) -> Path:
-    """Create a PowerShell script that replaces the running EXE and restarts the app."""
+    """Create a PowerShell script that waits for both Python and the PyInstaller OneFile parent bootloader to release the EXE, replaces it, and restarts the app."""
     script_dir = Path.home() / "AppData" / "Local" / "Temp" / "neurowings-updater"
     script_dir.mkdir(parents=True, exist_ok=True)
     script_path = script_dir / "apply_update.ps1"
@@ -322,6 +322,14 @@ def create_windows_update_script(downloaded_exe: Path, target_exe: Path, pid_to_
 $pidToWait = {pid_to_wait}
 $source = '{source}'
 $target = '{target}'
+$logFile = Join-Path (Split-Path -Parent $MyInvocation.MyCommand.Path) 'updater.log'
+
+function Write-UpdaterLog($msg) {{
+    $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
+    Add-Content -LiteralPath $logFile -Value "$ts | $msg" -Encoding UTF8 -ErrorAction SilentlyContinue
+}}
+
+Write-UpdaterLog "Waiting for PID $pidToWait to exit (target=$target)"
 
 for ($i = 0; $i -lt 600; $i++) {{
     if (-not (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue)) {{
@@ -330,15 +338,55 @@ for ($i = 0; $i -lt 600; $i++) {{
     Start-Sleep -Milliseconds 500
 }}
 
-if (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{ throw 'Application is still running' }}
+if (Get-Process -Id $pidToWait -ErrorAction SilentlyContinue) {{
+    Write-UpdaterLog "ERROR: Application PID $pidToWait is still running"
+    throw 'Application is still running'
+}}
+
+# Wait for PyInstaller OneFile parent bootloader (_MEI cleanup) and Windows Defender to release file lock on $target
+Start-Sleep -Milliseconds 1200
+
 $backup = $target + '.previous'
-Copy-Item -LiteralPath $target -Destination $backup -Force
-try {{ Copy-Item -LiteralPath $source -Destination $target -Force }}
-catch {{ Copy-Item -LiteralPath $backup -Destination $target -Force; throw }}
+$replaced = $false
+$lastErr = $null
+
+for ($attempt = 1; $attempt -le 40; $attempt++) {{
+    try {{
+        if (Test-Path -LiteralPath $target) {{
+            Copy-Item -LiteralPath $target -Destination $backup -Force
+        }}
+        Copy-Item -LiteralPath $source -Destination $target -Force
+        $replaced = $true
+        Write-UpdaterLog "Successfully replaced $target on attempt $attempt"
+        break
+    }} catch {{
+        $lastErr = $_
+        Write-UpdaterLog "Attempt $attempt failed (file locked): $($_.Exception.Message)"
+        Start-Sleep -Milliseconds 750
+    }}
+}}
+
+if (-not $replaced) {{
+    Write-UpdaterLog "FATAL: Could not replace $target after 40 attempts: $lastErr"
+    if (Test-Path -LiteralPath $backup) {{
+        Copy-Item -LiteralPath $backup -Destination $target -Force -ErrorAction SilentlyContinue
+    }}
+    try {{
+        Add-Type -AssemblyName PresentationFramework -ErrorAction SilentlyContinue
+        [System.Windows.MessageBox]::Show(
+            "Не удалось заменить файл программы (возможно, открыта вторая копия НейроКрылья или файл удерживается антивирусом):`n$target`n`nЗакройте все окна программы и запустите скачанный файл обновления:`n$source",
+            "Обновление НейроКрылья",
+            'OK',
+            'Warning'
+        ) | Out-Null
+    }} catch {{}}
+    exit 1
+}}
+
 Start-Process -FilePath $target
 Remove-Item -LiteralPath $source -Force -ErrorAction SilentlyContinue
 """
-    script_path.write_text(script, encoding="utf-8")
+    script_path.write_text(script, encoding="utf-8-sig")
     return script_path
 
 

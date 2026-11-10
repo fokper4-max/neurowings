@@ -38,7 +38,7 @@ def load_tps_into_image(img_data, tps_path):
         )
     img_data.width=width; img_data.height=height; img_data.wings=wings
 
-def save_tps_from_image(img_data, tps_path):
+def save_tps_from_image(img_data, tps_path, integer_pixels=True):
     path=Path(tps_path)
     enabled_wings=[w for w in img_data.wings if getattr(w, 'is_enabled', True)]
     lines=[f'LM={len(enabled_wings)*8}']
@@ -47,7 +47,14 @@ def save_tps_from_image(img_data, tps_path):
         if len(points)!=8: raise ValueError('TPS: требуется 8 точек на крыло')
         for x,y in points:
             if not math.isfinite(x) or not math.isfinite(y): raise ValueError('TPS: недопустимые координаты')
-            lines.append(f'{x:.5f} {img_data.height-y:.5f}'.replace('.',','))
+            y_tps=img_data.height-y
+            if integer_pixels:
+                x_out=float(int(round(x)))
+                y_out=float(int(round(y_tps)))
+            else:
+                x_out=float(x)
+                y_out=float(y_tps)
+            lines.append(f'{x_out:.5f} {y_out:.5f}'.replace('.',','))
     lines.extend([f'IMAGE={img_data.path.name}','ID=0'])
     text='\r\n'.join(lines)+'\r\n'
     try: payload=text.encode('cp1251')

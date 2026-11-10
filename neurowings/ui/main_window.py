@@ -136,6 +136,10 @@ class MainWindow(QMainWindow):
         self._apply_light_theme()
         self._show_empty_canvas_hint()
         self._load_models()
+        startup_folder = os.environ.get("NEUROWINGS_OPEN_FOLDER", "").strip()
+        if startup_folder and Path(startup_folder).is_dir():
+            self.current_folder = Path(startup_folder)
+            QTimer.singleShot(100, self._load_folder)
         if os.environ.get("QT_QPA_PLATFORM") != "offscreen":
             QTimer.singleShot(1500, self._auto_check_for_updates)
 
@@ -1111,14 +1115,65 @@ class MainWindow(QMainWindow):
         else:
             self._show_empty_canvas_hint()
 
-    def _load_tps_for_image(self, img_data: ImageData, tps_path: Path):
-        """Загрузить TPS файл (через tps_io)"""
+    @staticmethod
+    def _tps_file_needs_excel_repair(tps_path: Path) -> bool:
+        """Проверить, содержит ли существующий .tps дробные координаты (не ',00000') или устаревший подвал (не 'ID=0')."""
         try:
+            if not tps_path or not tps_path.exists():
+                return False
+            raw = tps_path.read_bytes()
+            try:
+                text = raw.decode("utf-8-sig")
+            except UnicodeDecodeError:
+                text = raw.decode("cp1251", errors="ignore")
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            has_id0 = False
+            i = 0
+            while i < len(lines):
+                upper = lines[i].upper()
+                if upper == "ID=0":
+                    has_id0 = True
+                if upper.startswith("LM="):
+                    try:
+                        cnt = int(lines[i].split("=", 1)[1])
+                    except ValueError:
+                        return True
+                    for k in range(1, cnt + 1):
+                        if i + k >= len(lines):
+                            return True
+                        parts = lines[i + k].split()
+                        if len(parts) != 2:
+                            return True
+                        for token in parts:
+                            if "." in token:
+                                return True
+                            if "," in token:
+                                frac = token.split(",", 1)[1]
+                                if any(ch != "0" for ch in frac):
+                                    return True
+                    i += cnt + 1
+                    continue
+                i += 1
+            return not has_id0
+        except Exception:
+            return False
+
+    def _load_tps_for_image(self, img_data: ImageData, tps_path: Path):
+        """Загрузить TPS файл (через tps_io) и автоматически починить дробные координаты старых версий для Excel в. 2.5."""
+        try:
+            needs_repair = self._tps_file_needs_excel_repair(tps_path)
             load_tps_into_image(img_data, tps_path)
             restored_project = load_project(img_data, tps_path)
             if not restored_project:
                 for wing in img_data.wings:
                     wing.point_sources = ['gt'] * NUM_POINTS
+            if needs_repair and img_data.wings and img_data.height > 0:
+                self._snap_wings_to_integer_pixels(img_data, include_gt=True)
+                try:
+                    save_tps_from_image(img_data, tps_path)
+                    save_project(img_data, tps_path)
+                except Exception:
+                    pass
             img_data.is_processed = True
             img_data.analyze_all_wings()
         except Exception as e:
@@ -2388,12 +2443,15 @@ class MainWindow(QMainWindow):
         self.statusBar().showMessage(f"💾 Сохранено файлов: {saved}")
 
     @staticmethod
-    def _snap_wings_to_integer_pixels(img_data: ImageData):
+    def _snap_wings_to_integer_pixels(img_data: ImageData, include_gt: bool = False):
         """Округлить координаты точек крыльев до целых пикселей (1:1 совместимость с tpsDig2 и Excel в. 2.5)."""
         if not img_data or not img_data.wings:
             return
+        attrs = ("points", "points_yolo", "points_stage1", "points_stage2", "points_gt") if include_gt else (
+            "points", "points_yolo", "points_stage1", "points_stage2"
+        )
         for wing in img_data.wings:
-            for attr in ("points", "points_yolo", "points_stage1", "points_stage2"):
+            for attr in attrs:
                 pts_list = getattr(wing, attr, None)
                 if pts_list:
                     for pt in pts_list:
