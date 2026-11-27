@@ -87,6 +87,12 @@ hiddenimports = [
     'ultralytics.nn',
     'ultralytics.utils',
 ]
+for _opt_mod in ('torchvision._C_stable', 'torchvision.image_stable'):
+    try:
+        if _ilu.find_spec(_opt_mod) is not None:
+            hiddenimports.append(_opt_mod)
+    except Exception:
+        pass
 
 # Данные приложения (модели, конфиги и т.д.)
 datas = [

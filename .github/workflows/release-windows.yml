@@ -1,0 +1,398 @@
+name: Build and Release NeuroWings Windows EXE
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish_release:
+        description: 'Create/update GitHub Release v<APP_VERSION> with EXE and SHA256'
+        required: false
+        type: boolean
+        default: true
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+concurrency:
+  group: neurowings-release-windows
+  cancel-in-progress: false
+
+jobs:
+  build-windows-exe:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Python 3.11.9 x64
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11.9'
+          architecture: 'x64'
+
+      - name: Install CPU PyTorch and application dependencies
+        shell: pwsh
+        env:
+          PIP_DISABLE_PIP_VERSION_CHECK: '1'
+          PIP_NO_CACHE_DIR: '1'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m pip install --upgrade pip
+          python -m pip install --only-binary=:all: --index-url https://download.pytorch.org/whl/cpu torch torchvision
+          python -m pip install --only-binary=:all: --extra-index-url https://download.pytorch.org/whl/cpu -r requirements.txt
+          python -c "import torch, torchvision, PyQt5, ultralytics, cv2, PIL, openpyxl, matplotlib, PyInstaller; print('DEPS OK:', torch.__version__, 'cuda:', torch.version.cuda, 'tv:', torchvision.__version__, 'pyinstaller:', PyInstaller.__version__)"
+
+      - name: Fetch and SHA-256 verify 5 ML model weights
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import hashlib
+          import json
+          import tarfile
+          import urllib.request
+          from pathlib import Path
+
+          root = Path(".").resolve()
+          manifest_path = root / "neurowings" / "core" / "model_manifest.json"
+          manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+          models_dir = root / "models"
+          models_dir.mkdir(parents=True, exist_ok=True)
+          tmp_dir = root / "_tmp_models"
+          tmp_dir.mkdir(parents=True, exist_ok=True)
+
+          def sha256_bytes(data: bytes) -> str:
+              return hashlib.sha256(data).hexdigest()
+
+          def sha256_file(path: Path) -> str:
+              h = hashlib.sha256()
+              with path.open("rb") as fh:
+                  while True:
+                      chunk = fh.read(4 * 1024 * 1024)
+                      if not chunk:
+                          break
+                      h.update(chunk)
+              return h.hexdigest()
+
+          def missing_models():
+              out = []
+              for name, expected in manifest.items():
+                  p = models_dir / name
+                  if not p.exists() or sha256_file(p) != expected:
+                      out.append(name)
+              return out
+
+          # Source 1: models-v1.0/models.tar.gz on GitHub Releases
+          if missing_models():
+              tar_path = tmp_dir / "models.tar.gz"
+              url1 = "https://github.com/fokper4-max/neurowings/releases/download/models-v1.0/models.tar.gz"
+              print(f"Downloading {url1} ...")
+              try:
+                  urllib.request.urlretrieve(url1, tar_path)
+                  with tarfile.open(tar_path, "r:gz") as tf:
+                      for member in tf.getmembers():
+                          if not member.isfile():
+                              continue
+                          fname = Path(member.name.replace("\\", "/")).name
+                          if fname not in manifest:
+                              continue
+                          fobj = tf.extractfile(member)
+                          if fobj is None:
+                              continue
+                          data = fobj.read()
+                          digest = sha256_bytes(data)
+                          if digest == manifest[fname]:
+                              (models_dir / fname).write_bytes(data)
+                              print(f"  [models-v1.0] OK {fname} ({len(data)} B)")
+                          else:
+                              print(f"  [models-v1.0] SHA mismatch for {fname}: {digest}")
+              except Exception as exc:
+                  print(f"  [models-v1.0] skipped due to error: {exc}")
+              finally:
+                  if tar_path.exists():
+                      tar_path.unlink()
+
+          # Source 2 (fallback): extract exact verified weights from v2.2.2 OneFile EXE CArchive
+          rem = missing_models()
+          if rem:
+              print(f"Still missing after models-v1.0: {rem}. Fetching v2.2.2 EXE to extract verified models...")
+              from PyInstaller.archive.readers import CArchiveReader
+              exe_path = tmp_dir / "NeuroWings-2.2.2.exe"
+              url2 = "https://github.com/fokper4-max/neurowings/releases/download/v2.2.2/NeuroWings-2.2.2.exe"
+              urllib.request.urlretrieve(url2, exe_path)
+              reader = CArchiveReader(str(exe_path))
+              needed = set(rem)
+              for entry_name in list(reader.toc.keys()):
+                  norm = str(entry_name).replace("\\", "/")
+                  fname = Path(norm).name
+                  if fname in needed:
+                      data = reader.extract(entry_name)
+                      digest = sha256_bytes(data)
+                      if digest == manifest[fname]:
+                          (models_dir / fname).write_bytes(data)
+                          needed.remove(fname)
+                          print(f"  [v2.2.2 CArchive] OK {fname} ({len(data)} B)")
+                      else:
+                          print(f"  [v2.2.2 CArchive] SHA mismatch for {entry_name}: {digest}")
+              if exe_path.exists():
+                  exe_path.unlink()
+
+          final_missing = missing_models()
+          if final_missing:
+              raise SystemExit(f"FATAL: missing or mismatched model weights: {final_missing}")
+          print("ALL 5 MODEL WEIGHTS VERIFIED AGAINST model_manifest.json!")
+          '@ | Set-Content -Path _fetch_models.py -Encoding UTF8
+          python _fetch_models.py
+          Remove-Item -Force _fetch_models.py
+          Remove-Item -Recurse -Force _tmp_models -ErrorAction SilentlyContinue
+
+      - name: Run full regression test suite on native Windows
+        shell: pwsh
+        env:
+          QT_QPA_PLATFORM: 'offscreen'
+          YOLO_OFFLINE: 'true'
+          YOLO_AUTOINSTALL: 'false'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          python -m unittest discover -s tests -p "test_*.py" -v
+
+      - name: Check version sync and build PyInstaller OneFile EXE
+        shell: pwsh
+        env:
+          YOLO_OFFLINE: 'true'
+          YOLO_AUTOINSTALL: 'false'
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $ver = (python -c "import re; from pathlib import Path; m=re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"', Path('neurowings/core/constants.py').read_text(encoding='utf-8')); print(m.group(1))").Trim()
+          $nsiVer = (python -c "import re; from pathlib import Path; m=re.search(r'!define\s+PRODUCT_VERSION\s+\"([^\"]+)\"', Path('installer/installer.nsi').read_text(encoding='utf-8')); print(m.group(1))").Trim()
+          if ($ver -ne $nsiVer) {
+            throw "Version mismatch: constants.py=$ver vs installer.nsi=$nsiVer"
+          }
+          Write-Host "Building NeuroWings $ver ..."
+          "APP_VERSION=$ver" >> $env:GITHUB_ENV
+          "RELEASE_TAG=v$ver" >> $env:GITHUB_ENV
+
+          python -m PyInstaller --clean --noconfirm installer\NeuroWings.spec
+          if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed with exit $LASTEXITCODE" }
+
+          $built = Get-ChildItem -LiteralPath dist -Filter '*.exe' -File | Select-Object -First 1
+          if (-not $built) { throw "No built .exe found in dist/" }
+          $targetName = "NeuroWings-$ver.exe"
+          $targetExe = Join-Path (Resolve-Path dist) $targetName
+          if ($built.FullName -ne $targetExe) {
+            Copy-Item -LiteralPath $built.FullName -Destination $targetExe -Force
+          }
+
+          $sha = (Get-FileHash -LiteralPath $targetExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          $shaLine = "$sha  $targetName`n"
+          $shaPath = "$targetExe.sha256"
+          [IO.File]::WriteAllText($shaPath, $shaLine, [Text.UTF8Encoding]::new($false))
+
+          $sizeBytes = (Get-Item -LiteralPath $targetExe).Length
+          "EXE_PATH=$targetExe" >> $env:GITHUB_ENV
+          "SHA_PATH=$shaPath" >> $env:GITHUB_ENV
+          "EXE_NAME=$targetName" >> $env:GITHUB_ENV
+          "EXE_SHA256=$sha" >> $env:GITHUB_ENV
+          "EXE_SIZE_BYTES=$sizeBytes" >> $env:GITHUB_ENV
+          Write-Host "Built $targetName ($sizeBytes bytes), SHA256=$sha"
+
+          # Verify all 5 models are embedded inside OneFile CArchive
+          python -c "
+          import json
+          from pathlib import Path
+          from PyInstaller.archive.readers import CArchiveReader
+          manifest = json.loads(Path('neurowings/core/model_manifest.json').read_text(encoding='utf-8'))
+          reader = CArchiveReader(r'$targetExe')
+          names = {Path(str(k).replace('\\\\', '/')).name for k in reader.toc.keys()}
+          missing = [m for m in manifest if m not in names]
+          assert not missing, f'Models missing in EXE: {missing}'
+          print('CArchive verification OK: all 5 models embedded.')
+          "
+
+      - name: Smoke test built OneFile EXE on native Windows (CLI + GUI)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $smokeDir = Join-Path $env:RUNNER_TEMP 'nw-smoke'
+          New-Item -ItemType Directory -Force -Path $smokeDir | Out-Null
+          $smokeImg = Join-Path $smokeDir 'smoke_wing.jpg'
+          $smokeOut = Join-Path $smokeDir 'out'
+
+          python -c "from PIL import Image; Image.new('RGB', (1200, 800), (248, 248, 248)).save(r'$smokeImg', quality=95)"
+
+          # 1. CLI --recognize smoke test: loads PyTorch, YOLO, Stage2, SubPixel, Portable, verifies SHA256 of models
+          Write-Host "Running OneFile CLI smoke test..."
+          $cliOut = & $env:EXE_PATH --recognize $smokeImg --output $smokeOut 2>&1
+          $cliExit = $LASTEXITCODE
+          Write-Host ($cliOut -join "`n")
+          if ($cliExit -ne 0) { throw "OneFile CLI smoke test failed with exit $cliExit" }
+          if (-not (Test-Path (Join-Path $smokeOut 'points.json'))) {
+            throw "OneFile CLI smoke test did not produce points.json"
+          }
+
+          # 2. Native Windows GUI window startup & clean shutdown smoke test
+          Write-Host "Running OneFile native GUI smoke test..."
+          $stdoutLog = Join-Path $smokeDir 'gui.stdout.log'
+          $stderrLog = Join-Path $smokeDir 'gui.stderr.log'
+          $proc = Start-Process -FilePath $env:EXE_PATH -PassThru -RedirectStandardOutput $stdoutLog -RedirectStandardError $stderrLog
+          try {
+            $deadline = (Get-Date).AddSeconds(90)
+            $winProc = $null
+            $expectedTitlePattern = "*НейроКрылья*$($env:APP_VERSION)*"
+            while ((Get-Date) -lt $deadline) {
+              Start-Sleep -Milliseconds 500
+              if ($proc.HasExited) {
+                throw "GUI process exited prematurely with code $($proc.ExitCode)"
+              }
+              $candidates = @($proc)
+              try {
+                $children = Get-CimInstance Win32_Process -Filter "ParentProcessId = $($proc.Id)" -ErrorAction SilentlyContinue
+                foreach ($ch in $children) {
+                  $gp = Get-Process -Id $ch.ProcessId -ErrorAction SilentlyContinue
+                  if ($gp) { $candidates += $gp }
+                }
+              } catch {}
+              foreach ($cand in $candidates) {
+                try {
+                  $cand.Refresh()
+                  if (-not [string]::IsNullOrWhiteSpace($cand.MainWindowTitle) -and $cand.MainWindowTitle -like $expectedTitlePattern) {
+                    $winProc = $cand
+                    Write-Host "Observed native GUI window (PID $($cand.Id)): '$($cand.MainWindowTitle)' (Responding=$($cand.Responding))"
+                    break
+                  }
+                } catch {}
+              }
+              if ($winProc) { break }
+            }
+            if (-not $winProc) {
+              throw "Timed out waiting for NeuroWings MainWindow matching $expectedTitlePattern"
+            }
+            Start-Sleep -Seconds 2
+            $winProc.Refresh()
+            if (-not $winProc.Responding) {
+              throw "MainWindow is not responding"
+            }
+            $closed = $winProc.CloseMainWindow()
+            if (-not $closed) {
+              Write-Host "CloseMainWindow returned false, terminating cleanly..."
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            } elseif (-not $proc.WaitForExit(20000)) {
+              Write-Host "Process did not exit in 20s, stopping process..."
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            } else {
+              Write-Host "GUI closed cleanly with exit code $($proc.ExitCode)"
+              if ($proc.ExitCode -ne 0) {
+                throw "Unexpected GUI exit code: $($proc.ExitCode)"
+              }
+            }
+          } catch {
+            foreach ($lf in @($stdoutLog, $stderrLog)) {
+              if (Test-Path $lf) {
+                Write-Host "=== $lf ==="
+                Get-Content -LiteralPath $lf -Tail 100 -ErrorAction SilentlyContinue | Write-Host
+              }
+            }
+            if (-not $proc.HasExited) {
+              Stop-Process -Id $proc.Id -Force -ErrorAction SilentlyContinue
+            }
+            throw
+          }
+
+      - name: Prepare release notes
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          @'
+          import os
+          import re
+          from pathlib import Path
+
+          ver = os.environ["APP_VERSION"]
+          exe_name = os.environ["EXE_NAME"]
+          sha = os.environ["EXE_SHA256"]
+          size_bytes = int(os.environ["EXE_SIZE_BYTES"])
+          size_fmt = f"{size_bytes:,}".replace(",", " ")
+
+          changelog = Path("CHANGELOG.md").read_text(encoding="utf-8")
+          pattern = re.compile(rf"^##\s+\[{re.escape(ver)}\].*?$", re.MULTILINE)
+          m = pattern.search(changelog)
+          notes_lines = []
+          if m:
+              rest = changelog[m.end():]
+              nxt = re.search(r"^##\s+\[", rest, re.MULTILINE)
+              section = rest[:nxt.start()] if nxt else rest
+              for line in section.splitlines():
+                  s = line.strip()
+                  if s.startswith("- "):
+                      s = s.replace("\u2014", "-").replace("\u2013", "-")
+                      notes_lines.append(s)
+
+          if not notes_lines:
+              notes_lines = [f"- Релиз НейроКрылья v{ver}."]
+
+          body = (
+              f"## НейроКрылья v{ver}\n\n"
+              "Обновление доступно **напрямую изнутри программы** "
+              "(при запуске через всплывающее окно «Доступно обновление» или на вкладке **«🔄 Обновление»**).\n\n"
+              f"### Что нового в v{ver}\n"
+              + "\n".join(notes_lines)
+              + f"\n\n### SHA256 (`{exe_name}`, {size_fmt} байт)\n"
+              f"```\n{sha}  {exe_name}\n```\n"
+          )
+          Path("release_notes.md").write_text(body, encoding="utf-8")
+          print(body)
+          '@ | Set-Content -Path _make_notes.py -Encoding UTF8
+          python _make_notes.py
+          Remove-Item -Force _make_notes.py
+
+      - name: Upload SHA256 and notes artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: neurowings-release-meta-${{ env.APP_VERSION }}
+          path: |
+            ${{ env.SHA_PATH }}
+            release_notes.md
+          retention-days: 7
+
+      - name: Publish GitHub Release
+        if: ${{ github.event_name == 'push' || inputs.publish_release }}
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $tag = $env:RELEASE_TAG
+          $ver = $env:APP_VERSION
+          $title = "NeuroWings $ver"
+
+          $exists = $false
+          $prevEap = $ErrorActionPreference
+          $ErrorActionPreference = 'Continue'
+          try {
+            $null = & gh release view $tag --repo $env:GITHUB_REPOSITORY 2>$null
+            if ($LASTEXITCODE -eq 0) { $exists = $true }
+          } catch {
+            $exists = $false
+          } finally {
+            $ErrorActionPreference = $prevEap
+          }
+
+          if ($exists) {
+            Write-Host "Release $tag already exists, updating assets and notes..."
+            gh release upload $tag $env:EXE_PATH $env:SHA_PATH --repo $env:GITHUB_REPOSITORY --clobber
+            if ($LASTEXITCODE -ne 0) { throw "gh release upload failed" }
+            gh release edit $tag --repo $env:GITHUB_REPOSITORY --title $title --notes-file release_notes.md --latest
+            if ($LASTEXITCODE -ne 0) { throw "gh release edit failed" }
+          } else {
+            Write-Host "Creating GitHub Release $tag ($title)..."
+            gh release create $tag $env:EXE_PATH $env:SHA_PATH `
+              --repo $env:GITHUB_REPOSITORY `
+              --title $title `
+              --target main `
+              --latest `
+              --notes-file release_notes.md
+            if ($LASTEXITCODE -ne 0) { throw "gh release create failed" }
+          }
