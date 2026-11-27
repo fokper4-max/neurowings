@@ -32,7 +32,20 @@ from ..core.update_manager import (
     is_direct_download_url,
     launch_windows_update_script,
 )
-from ..core.image_io import read_pixmap, image_size, preload_rgb_parallel
+from ..core.image_io import (
+    read_pixmap,
+    read_pixmap_for_display,
+    evict_image_cache,
+    clear_image_cache,
+    image_size,
+    preload_rgb_parallel,
+)
+from ..core.image_split import (
+    SplitRegion,
+    ROTATION_OPTIONS,
+    detect_family_regions,
+    generate_grid_regions,
+)
 from ..core.project_io import save_project, load_project
 from ..core.tps_io import load_tps_into_image, save_tps_from_image
 from ..core.pdf_passport import generate_pdf_passport
@@ -45,12 +58,15 @@ from PyQt5.QtWidgets import (
     QSplitter, QToolBar, QFileDialog, QMessageBox, QProgressBar,
     QTableWidget, QTableWidgetItem, QHeaderView, QAbstractItemView,
     QScrollArea, QShortcut, QRadioButton, QButtonGroup, QAction, QTabWidget, QGridLayout,
-    QApplication, QMenu, QSizePolicy, QDialog, QDialogButtonBox, QProgressDialog, QTextBrowser
+    QApplication, QMenu, QSizePolicy, QDialog, QDialogButtonBox, QProgressDialog, QTextBrowser,
+    QSpinBox, QInputDialog, QLineEdit, QTextEdit
 )
 from PyQt5.QtCore import Qt, pyqtSignal, QTimer, QUrl, QThread
-from PyQt5.QtGui import QPixmap, QColor, QKeySequence, QPen, QFont, QDesktopServices
+from PyQt5.QtGui import QPixmap, QColor, QKeySequence, QPen, QFont, QDesktopServices, QTransform
 
-from .graphics_items import PointItem, WingLabelItem, BBoxItem, MeasurementLineItem
+from .graphics_items import (
+    PointItem, WingLabelItem, BBoxItem, MeasurementLineItem, SplitRegionItem
+)
 from .graphics_view import ZoomableGraphicsView
 from .analysis_widget import AnalysisWidget
 from .graphs_widget import GraphsWidget
@@ -60,6 +76,7 @@ from .dialogs import PointSettingsDialog
 from .wing_guide_widget import WingGuideWidget, BeekeeperGuideDialog
 
 from ..workers import ProcessingWorker, UpdateCheckWorker, UpdateDownloadWorker
+from ..workers.split import SplitWorker
 
 
 class MainWindow(QMainWindow):
@@ -103,6 +120,12 @@ class MainWindow(QMainWindow):
         self.wing_labels = []
         self.bbox_items = []
         self.measurement_lines = []
+        self.split_regions: List[SplitRegion] = []
+        self.split_region_items: List[SplitRegionItem] = []
+        self.split_worker = None
+        self._current_display_is_proxy = False
+        self._split_src_path_str: Optional[str] = None
+        self._split_auto_process: bool = False
         self.edit_mode = EditMode.VIEW
         self.selected_wing_idx = -1
         self.adding_points: List[Tuple[float, float]] = []
@@ -183,27 +206,47 @@ class MainWindow(QMainWindow):
         left_layout.setContentsMargins(5, 5, 5, 5)
 
         files_header = QHBoxLayout()
+        files_header.setSpacing(3)
         files_label = QLabel("📁 Файлы")
         files_label.setStyleSheet("font-weight: bold;")
         files_header.addWidget(files_label)
         files_header.addStretch()
 
+        compact_btn_style = "QToolButton { padding: 2px 0px; }"
+
         self.btn_select_all = QToolButton()
         self.btn_select_all.setText("✓")
+        self.btn_select_all.setFixedWidth(26)
+        self.btn_select_all.setStyleSheet(compact_btn_style)
         self.btn_select_all.setToolTip("Выбрать все файлы для пакетной обработки")
         self.btn_select_all.clicked.connect(self._select_all_files)
         files_header.addWidget(self.btn_select_all)
 
         self.btn_select_none = QToolButton()
         self.btn_select_none.setText("✗")
+        self.btn_select_none.setFixedWidth(26)
+        self.btn_select_none.setStyleSheet(compact_btn_style)
         self.btn_select_none.setToolTip("Снять выбор со всех файлов")
         self.btn_select_none.clicked.connect(self._deselect_all_files)
         files_header.addWidget(self.btn_select_none)
+
+        self.btn_remove_file = QToolButton()
+        self.btn_remove_file.setText("🗑")
+        self.btn_remove_file.setFixedWidth(30)
+        self.btn_remove_file.setStyleSheet(compact_btn_style)
+        self.btn_remove_file.setToolTip(
+            "Убрать текущий файл (или отмеченные галочкой файлы) из списка работы - исходный файл на диске сохранится"
+        )
+        self.btn_remove_file.clicked.connect(self._remove_files_action)
+        files_header.addWidget(self.btn_remove_file)
 
         left_layout.addLayout(files_header)
 
         self.file_list = QListWidget()
         self.file_list.itemClicked.connect(self._on_file_clicked)
+        self.file_list.currentRowChanged.connect(self._on_file_row_changed)
+        self.file_list.setContextMenuPolicy(Qt.CustomContextMenu)
+        self.file_list.customContextMenuRequested.connect(self._show_file_list_context_menu)
         left_layout.addWidget(self.file_list)
 
         self.lbl_files_stats = QLabel("0 файлов")
@@ -224,6 +267,102 @@ class MainWindow(QMainWindow):
         image_layout = QVBoxLayout(image_tab)
         image_layout.setContentsMargins(0, 0, 0, 0)
 
+        # Панель инструмента «Ножницы» (разбивка общего скана на отдельные файлы семей)
+        self.split_bar = QWidget()
+        self.split_bar.setObjectName("splitBar")
+        self.split_bar.setStyleSheet(
+            "#splitBar { background-color: #eef7ff; border-bottom: 1px solid #90cdf4; }"
+            "#splitBar QPushButton { padding: 4px 8px; }"
+            "#splitBar QToolButton { padding: 3px 6px; }"
+        )
+        split_bar_layout = QVBoxLayout(self.split_bar)
+        split_bar_layout.setContentsMargins(8, 5, 8, 5)
+        split_bar_layout.setSpacing(4)
+
+        split_row1 = QHBoxLayout()
+        split_row1.setSpacing(5)
+
+        self.btn_split_auto = QPushButton("✨ Авто-поиск семей")
+        self.btn_split_auto.setToolTip("Автоматически найти все семьи на скане по белым зазорам")
+        self.btn_split_auto.clicked.connect(self._auto_detect_split_regions)
+        split_row1.addWidget(self.btn_split_auto)
+
+        lbl_grid = QLabel("Сетка:")
+        lbl_grid.setStyleSheet("background: transparent;")
+        split_row1.addWidget(lbl_grid)
+
+        self.spin_split_count = QSpinBox()
+        self.spin_split_count.setRange(2, 20)
+        self.spin_split_count.setValue(5)
+        self.spin_split_count.setFixedWidth(48)
+        split_row1.addWidget(self.spin_split_count)
+
+        self.btn_split_grid_h = QPushButton("≡ Полосы")
+        self.btn_split_grid_h.setToolTip("Разделить скан на равные горизонтальные полосы")
+        self.btn_split_grid_h.clicked.connect(lambda: self._apply_split_grid("horizontal"))
+        split_row1.addWidget(self.btn_split_grid_h)
+
+        self.btn_split_grid_v = QPushButton("||| Колонки")
+        self.btn_split_grid_v.setToolTip("Разделить скан на равные вертикальные колонки")
+        self.btn_split_grid_v.clicked.connect(lambda: self._apply_split_grid("vertical"))
+        split_row1.addWidget(self.btn_split_grid_v)
+
+        split_row1.addStretch()
+
+        self.btn_split_apply = QPushButton("✂ Разрезать (0)")
+        self.btn_split_apply.setEnabled(False)
+        self.btn_split_apply.setStyleSheet(
+            "QPushButton { background-color: #2b8a3e; color: white; font-weight: bold; "
+            "border: 1px solid #237032; border-radius: 3px; padding: 4px 9px; }"
+            "QPushButton:hover { background-color: #2f9e44; }"
+            "QPushButton:disabled { background-color: #adb5bd; border-color: #adb5bd; color: #f8f9fa; }"
+        )
+        self.btn_split_apply.clicked.connect(self._apply_split_regions)
+        split_row1.addWidget(self.btn_split_apply)
+
+        self.btn_split_clear = QPushButton("🗑 Очистить")
+        self.btn_split_clear.clicked.connect(lambda: self._clear_split_regions(update_ui=True))
+        split_row1.addWidget(self.btn_split_clear)
+
+        self.btn_split_close = QToolButton()
+        self.btn_split_close.setText("✖")
+        self.btn_split_close.setToolTip("Закрыть Ножницы (Esc)")
+        self.btn_split_close.clicked.connect(lambda: self._set_edit_mode(EditMode.VIEW))
+        split_row1.addWidget(self.btn_split_close)
+
+        split_bar_layout.addLayout(split_row1)
+
+        split_row2 = QHBoxLayout()
+        split_row2.setSpacing(6)
+
+        lbl_rot = QLabel("Поворот кропов:")
+        lbl_rot.setStyleSheet("background: transparent;")
+        split_row2.addWidget(lbl_rot)
+
+        self.combo_split_rotation = QComboBox()
+        for rot_code, rot_label in ROTATION_OPTIONS:
+            self.combo_split_rotation.addItem(rot_label, rot_code)
+        split_row2.addWidget(self.combo_split_rotation)
+
+        self.chk_split_auto_process = QCheckBox("⚡ Сразу распознать")
+        self.chk_split_auto_process.setChecked(False)
+        self.chk_split_auto_process.setStyleSheet("background: transparent;")
+        split_row2.addWidget(self.chk_split_auto_process)
+
+        split_row2.addStretch()
+        split_bar_layout.addLayout(split_row2)
+
+        self.lbl_split_hint = QLabel(
+            "Обведите каждую семью прямоугольником на скане или нажмите «✨ Авто-поиск семей». "
+            "Двойной клик по рамке - переименовать семью."
+        )
+        self.lbl_split_hint.setStyleSheet("font-size: 11px; color: #1864ab; background: transparent;")
+        self.lbl_split_hint.setWordWrap(True)
+        split_bar_layout.addWidget(self.lbl_split_hint)
+
+        self.split_bar.setVisible(False)
+        image_layout.addWidget(self.split_bar)
+
         self.scene = QGraphicsScene()
         self.view = ZoomableGraphicsView(self.scene, self)
         self.view.point_clicked.connect(self._on_point_clicked)
@@ -235,6 +374,10 @@ class MainWindow(QMainWindow):
         self.view.bbox_delete_requested.connect(self._on_bbox_delete)
         self.view.wing_reset_requested.connect(self._on_wing_reset_requested)
         self.view.bbox_recognize_requested.connect(self._on_bbox_recognize_requested)
+        self.view.split_region_created.connect(self._on_split_region_created)
+        self.view.split_region_changed.connect(self._on_split_region_changed)
+        self.view.split_region_delete_requested.connect(self._on_split_region_delete)
+        self.view.split_region_rename_requested.connect(self._on_split_region_rename)
         self.view.setFocusPolicy(Qt.StrongFocus)
         image_layout.addWidget(self.view)
 
@@ -243,8 +386,8 @@ class MainWindow(QMainWindow):
         info_layout = QHBoxLayout(info_bar)
         info_layout.setContentsMargins(10, 3, 10, 3)
 
-        self.lbl_filename = QLabel("Файл: —")
-        self.lbl_size = QLabel("Размер: —")
+        self.lbl_filename = QLabel("Файл: -")
+        self.lbl_size = QLabel("Размер: -")
         self.lbl_wings_count = QLabel("Крыльев: 0")
         self.lbl_mode = QLabel("Режим: Просмотр (точки можно двигать мышкой)")
 
@@ -298,7 +441,7 @@ class MainWindow(QMainWindow):
         right_layout = QVBoxLayout(self.right_panel)
         right_layout.setContentsMargins(5, 5, 5, 5)
 
-        wings_label = QLabel("🦋 Крылья (☑ — учитывать в расчёте)")
+        wings_label = QLabel("🦋 Крылья (☑ - учитывать в расчёте)")
         wings_label.setStyleSheet("font-weight: bold;")
         right_layout.addWidget(wings_label)
 
@@ -315,18 +458,19 @@ class MainWindow(QMainWindow):
         right_layout.addWidget(self.wings_table)
 
         wing_btns_layout = QHBoxLayout()
-        self.btn_delete_wing = QPushButton("🗑 Удалить крыло")
+        self.btn_delete_wing = QPushButton("🗑 Удалить")
+        self.btn_delete_wing.setToolTip("Удалить выбранное крыло со скана (Delete)")
         self.btn_delete_wing.clicked.connect(self._delete_selected_wing)
         wing_btns_layout.addWidget(self.btn_delete_wing)
 
-        self.btn_reset_wing = QPushButton("🔄 Сбросить точки")
+        self.btn_reset_wing = QPushButton("🔄 Сбросить")
         self.btn_reset_wing.setToolTip("Вернуть точки выбранного крыла к исходным (нейросеть / TPS)")
         self.btn_reset_wing.clicked.connect(self._reset_selected_wing)
         wing_btns_layout.addWidget(self.btn_reset_wing)
         right_layout.addLayout(wing_btns_layout)
 
         # Схема точек крыла (1-8) для пасечника
-        self.wing_guide_group = QGroupBox("📌 Схема точек крыла (1–8)")
+        self.wing_guide_group = QGroupBox("📌 Схема точек крыла (1-8)")
         wg_layout = QVBoxLayout(self.wing_guide_group)
         wg_layout.setContentsMargins(4, 6, 4, 4)
         self.wing_guide = WingGuideWidget(self)
@@ -336,18 +480,22 @@ class MainWindow(QMainWindow):
         # Группа вспомогательных элементов
         auxiliary_group = QGroupBox("🔧 Отображение на скане")
         aux_layout = QVBoxLayout(auxiliary_group)
+        aux_layout.setContentsMargins(6, 4, 6, 4)
 
-        self.chk_bbox = QCheckBox("🟠 Показывать рамки крыльев")
+        self.chk_bbox = QCheckBox("🟠 Рамки крыльев")
+        self.chk_bbox.setToolTip("Показывать рамки обнаруженных крыльев на скане")
         self.chk_bbox.setChecked(False)
         self.chk_bbox.toggled.connect(lambda checked: self._on_display_toggle(checked))
         aux_layout.addWidget(self.chk_bbox)
 
-        self.chk_measurement = QCheckBox("📏 Показывать линии промеров")
+        self.chk_measurement = QCheckBox("📏 Линии промеров")
+        self.chk_measurement.setToolTip("Показывать линии промеров индексов крыла на скане")
         self.chk_measurement.setChecked(False)
         self.chk_measurement.toggled.connect(lambda checked: self._on_display_toggle(checked))
         aux_layout.addWidget(self.chk_measurement)
 
-        self.chk_gt = QCheckBox("🟢 Показать исходные точки TPS")
+        self.chk_gt = QCheckBox("🟢 Исходные точки TPS")
+        self.chk_gt.setToolTip("Показать исходные эталонные точки из файла TPS")
         self.chk_gt.setChecked(False)
         self.chk_gt.toggled.connect(lambda checked: self._on_display_toggle(checked))
         aux_layout.addWidget(self.chk_gt)
@@ -490,6 +638,9 @@ class MainWindow(QMainWindow):
         file_menu.addAction("📂 Открыть скан/фото...", self._open_files, "Ctrl+O")
         file_menu.addAction("📁 Открыть папку со сканами...", self._open_folder, "Ctrl+Shift+O")
         file_menu.addSeparator()
+        file_menu.addAction("❌ Убрать текущий файл из списка", self._remove_current_file, "Ctrl+W")
+        file_menu.addAction("🧹 Очистить список файлов", self._clear_file_list, "Ctrl+Shift+W")
+        file_menu.addSeparator()
         file_menu.addAction("💾 Сохранить TPS", self._save_current, "Ctrl+S")
         file_menu.addAction("💾 Сохранить все TPS", self._save_all)
         file_menu.addSeparator()
@@ -503,9 +654,15 @@ class MainWindow(QMainWindow):
         edit_menu.addAction("Сбросить точки выбранного крыла", self._reset_selected_wing)
         edit_menu.addAction("Удалить крыло", self._delete_selected_wing, "Delete")
         edit_menu.addSeparator()
-        edit_menu.addAction("🔄 Повернуть скан на 90° вправо", self._rotate_current_image_cw, "Ctrl+R")
+        edit_menu.addAction("↺ Повернуть скан на 90° влево", self._rotate_current_image_ccw, "Ctrl+Shift+R")
+        edit_menu.addAction("↻ Повернуть скан на 90° вправо", self._rotate_current_image_cw, "Ctrl+R")
         edit_menu.addAction("🔄 Повернуть скан на 180°", self._rotate_current_image_180)
         edit_menu.addAction("↔ Отразить скан по горизонтали", self._flip_current_image_h)
+        edit_menu.addSeparator()
+        edit_menu.addAction(
+            "✂ Разбить скан на семьи (Ножницы)",
+            lambda: self._set_edit_mode(EditMode.SPLIT),
+        )
 
         view_menu = menubar.addMenu("Вид")
         view_menu.addAction("Увеличить", lambda: self._zoom(1.25))
@@ -530,86 +687,120 @@ class MainWindow(QMainWindow):
         help_menu.addAction("О программе", self._show_about)
 
     def _setup_toolbar(self):
-        """Настройка панели инструментов"""
-        toolbar = QToolBar("Инструменты")
-        toolbar.setMovable(False)
-        self.addToolBar(toolbar)
+        """Настройка двух компактных панелей инструментов"""
+        toolbar_top = QToolBar("Файлы и анализ")
+        toolbar_top.setMovable(False)
+        self.addToolBar(toolbar_top)
 
-        toolbar.addAction("📂 Открыть скан/фото", self._open_files)
-        toolbar.addAction("📁 Открыть папку", self._open_folder)
-        toolbar.addSeparator()
+        act_open = toolbar_top.addAction("📂 Открыть", self._open_files)
+        act_open.setToolTip("Открыть скан или фото крыльев (Ctrl+O)")
+        act_folder = toolbar_top.addAction("📁 Папка", self._open_folder)
+        act_folder.setToolTip("Открыть папку со сканами крыльев (Ctrl+Shift+O)")
+        toolbar_top.addSeparator()
 
-        toolbar.addAction("◀", self._prev_file)
-        toolbar.addAction("▶", self._next_file)
-        toolbar.addSeparator()
+        act_prev = toolbar_top.addAction("◀", self._prev_file)
+        act_prev.setToolTip("Предыдущий файл (PageUp)")
+        act_next = toolbar_top.addAction("▶", self._next_file)
+        act_next.setToolTip("Следующий файл (PageDown)")
+        toolbar_top.addSeparator()
+
+        toolbar_top.addAction("⚡ Обработать", self._process_smart)
+        toolbar_top.addAction("💾 Сохранить", self._save_current)
+        toolbar_top.addAction("📄 PDF-Паспорт", self._export_pdf)
+        act_help = toolbar_top.addAction("❓ Помощь", self._show_beekeeper_guide)
+        act_help.setToolTip("Памятка пчеловода: как пользоваться программой (F1)")
+
+        act_minimap = toolbar_top.addAction("🗺 Обзор", self._toggle_minimap)
+        act_minimap.setToolTip("Показать/скрыть миникарту навигации (M)")
+        act_minimap.setShortcut("M")
+
+        toolbar_top.addSeparator()
+        toolbar_top.addAction("⬅ панель", self._toggle_left_panel)
+        toolbar_top.addAction("панель ➡", self._toggle_right_panel)
+
+        top_spacer = QWidget()
+        top_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar_top.addWidget(top_spacer)
+
+        self.chk_single_wing = QCheckBox("1 фото = 1 крыло")
+        self.chk_single_wing.setToolTip(
+            "Режим микроскопа (1 фото = 1 крыло): объединить все открытые одиночные фото крыльев в одну общую пробу улья"
+        )
+        self.chk_single_wing.setChecked(False)
+        self.chk_single_wing.toggled.connect(self._toggle_single_wing_mode)
+        toolbar_top.addWidget(self.chk_single_wing)
+
+        self.addToolBarBreak()
+
+        toolbar_canvas = QToolBar("Инструменты холста")
+        toolbar_canvas.setMovable(False)
+        self.addToolBar(toolbar_canvas)
 
         self.act_mode_view = QAction("👆 Просмотр", self)
         self.act_mode_view.setCheckable(True)
         self.act_mode_view.setChecked(True)
         self.act_mode_view.triggered.connect(lambda: self._set_edit_mode(EditMode.VIEW))
-        toolbar.addAction(self.act_mode_view)
+        toolbar_canvas.addAction(self.act_mode_view)
 
         self.act_mode_edit = QAction("✎ Редакт.", self)
         self.act_mode_edit.setCheckable(True)
         self.act_mode_edit.triggered.connect(lambda: self._set_edit_mode(EditMode.EDIT))
-        toolbar.addAction(self.act_mode_edit)
+        toolbar_canvas.addAction(self.act_mode_edit)
 
         self.act_mode_add = QAction("➕ Точки", self)
         self.act_mode_add.setCheckable(True)
         self.act_mode_add.triggered.connect(lambda: self._set_edit_mode(EditMode.ADD))
-        toolbar.addAction(self.act_mode_add)
+        toolbar_canvas.addAction(self.act_mode_add)
 
         self.act_mode_bbox = QAction("⬜ Рамка", self)
         self.act_mode_bbox.setCheckable(True)
+        self.act_mode_bbox.setToolTip(
+            "Обвести ОДНО пропущенное крыло для распознавания 8 точек (B). "
+            "Для разбивки листа с несколькими семьями используйте «✂ Ножницы» (C)."
+        )
         self.act_mode_bbox.triggered.connect(lambda: self._set_edit_mode(EditMode.BBOX))
-        toolbar.addAction(self.act_mode_bbox)
+        toolbar_canvas.addAction(self.act_mode_bbox)
 
-        toolbar.addSeparator()
-        toolbar.addAction("🔍+", lambda: self._zoom(1.25))
-        toolbar.addAction("🔍-", lambda: self._zoom(0.8))
-        act_rot90 = toolbar.addAction("🔄 90°", self._rotate_current_image_cw)
-        act_rot90.setToolTip("Повернуть текущий скан на 90° по часовой стрелке (Ctrl+R)")
-        act_rot180 = toolbar.addAction("🔄 180°", self._rotate_current_image_180)
+        toolbar_canvas.addSeparator()
+        toolbar_canvas.addAction("🔍+", lambda: self._zoom(1.25))
+        toolbar_canvas.addAction("🔍-", lambda: self._zoom(0.8))
+        toolbar_canvas.addSeparator()
+
+        act_rot_ccw = toolbar_canvas.addAction("↺ -90°", self._rotate_current_image_ccw)
+        act_rot_ccw.setToolTip("Повернуть текущий скан на 90° влево (против часовой стрелки, Ctrl+Shift+R)")
+        act_rot90 = toolbar_canvas.addAction("↻ 90°", self._rotate_current_image_cw)
+        act_rot90.setToolTip("Повернуть текущий скан на 90° вправо (по часовой стрелке, Ctrl+R)")
+        act_rot180 = toolbar_canvas.addAction("🔄 180°", self._rotate_current_image_180)
         act_rot180.setToolTip("Развернуть текущий скан на 180° (если крылья отсканированы вверх ногами или влево)")
-        act_flip = toolbar.addAction("↔ Отразить", self._flip_current_image_h)
+        act_flip = toolbar_canvas.addAction("↔ Отразить", self._flip_current_image_h)
         act_flip.setToolTip("Зеркально отразить текущий скан по горизонтали")
 
-        toolbar.addSeparator()
-        toolbar.addAction("⚡ Обработать", self._process_smart)
-        toolbar.addAction("💾 Сохранить", self._save_current)
-        toolbar.addAction("📄 PDF-Паспорт", self._export_pdf)
-        toolbar.addAction("❓ Как пользоваться", self._show_beekeeper_guide)
+        self.act_mode_split = QAction("✂ Ножницы", self)
+        self.act_mode_split.setCheckable(True)
+        self.act_mode_split.setToolTip(
+            "Разбить общий скан (5-10 семей на одном листе) на отдельные файлы семей прямо в программе (C)"
+        )
+        self.act_mode_split.triggered.connect(lambda: self._set_edit_mode(EditMode.SPLIT))
+        toolbar_canvas.addAction(self.act_mode_split)
 
-        act_minimap = toolbar.addAction("🗺 Обзор", self._toggle_minimap)
-        act_minimap.setToolTip("Показать/скрыть миникарту навигации (M)")
-        act_minimap.setShortcut("M")
+        bottom_spacer = QWidget()
+        bottom_spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
+        toolbar_canvas.addWidget(bottom_spacer)
 
-        toolbar.addSeparator()
-        toolbar.addAction("⬅ панель", self._toggle_left_panel)
-        toolbar.addAction("панель ➡", self._toggle_right_panel)
-
-        spacer = QWidget()
-        spacer.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Preferred)
-        toolbar.addWidget(spacer)
-
-        self.chk_single_wing = QCheckBox("1 фото = 1 крыло (микроскоп)")
-        self.chk_single_wing.setToolTip("Объединить все открытые одиночные фото крыльев в одну общую пробу улья")
-        self.chk_single_wing.setChecked(False)
-        self.chk_single_wing.toggled.connect(self._toggle_single_wing_mode)
-        toolbar.addWidget(self.chk_single_wing)
-
-        toolbar.addSeparator()
         lbl_power = QLabel(" Мощность: ")
         lbl_power.setStyleSheet("font-weight: bold; color: #222222;")
-        toolbar.addWidget(lbl_power)
+        toolbar_canvas.addWidget(lbl_power)
 
         self.combo_power_mode = QComboBox()
+        self.combo_power_mode.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.combo_power_mode.setMinimumContentsLength(16)
+        self.combo_power_mode.setMaximumWidth(235)
         for mode_key, mode_label in POWER_MODES.items():
             self.combo_power_mode.addItem(mode_label, mode_key)
         self.combo_power_mode.setCurrentIndex(0)
         self.combo_power_mode.setToolTip(self.compute_profile.detailed_tooltip_ru())
         self.combo_power_mode.currentIndexChanged.connect(self._on_power_mode_changed)
-        toolbar.addWidget(self.combo_power_mode)
+        toolbar_canvas.addWidget(self.combo_power_mode)
 
     def _on_power_mode_changed(self, idx: int):
         mode_key = self.combo_power_mode.itemData(idx) or "auto"
@@ -682,11 +873,20 @@ class MainWindow(QMainWindow):
         QShortcut(QKeySequence("E"), self, lambda: self._set_edit_mode(EditMode.EDIT))
         QShortcut(QKeySequence("A"), self, lambda: self._set_edit_mode(EditMode.ADD))
         QShortcut(QKeySequence("B"), self, lambda: self._set_edit_mode(EditMode.BBOX))
-        QShortcut(QKeySequence("Space"), self, self._process_smart)
+        QShortcut(QKeySequence("C"), self, lambda: self._set_edit_mode(EditMode.SPLIT))
+        QShortcut(QKeySequence("Space"), self, self._on_space_shortcut)
         QShortcut(QKeySequence("PageUp"), self, self._prev_file)
         QShortcut(QKeySequence("PageDown"), self, self._next_file)
         QShortcut(QKeySequence("Escape"), self, self._cancel_action)
         QShortcut(QKeySequence("F"), self, self._fit_view)
+
+    def _on_space_shortcut(self):
+        """Пробел: постановка точки/рамки в режимах ADD/BBOX/SPLIT, иначе запуск распознавания."""
+        if self.edit_mode in (EditMode.ADD, EditMode.BBOX, EditMode.SPLIT):
+            if hasattr(self.view, "trigger_keyboard_place"):
+                self.view.trigger_keyboard_place()
+            return
+        self._process_smart()
 
     def _toggle_expert_mode(self, checked: bool):
         self.expert_mode = bool(checked)
@@ -701,6 +901,14 @@ class MainWindow(QMainWindow):
         """Показать дружелюбную подсказку на пустом холсте."""
         if self.current_image is not None:
             return
+        if hasattr(self, "view") and hasattr(self.view, "cancel_drawing"):
+            self.view.cancel_drawing()
+        self.point_items.clear()
+        self.wing_labels.clear()
+        self.bbox_items.clear()
+        self.measurement_lines.clear()
+        self.split_region_items.clear()
+        self.temp_add_items.clear()
         self.scene.clear()
         text_item = QGraphicsTextItem()
         text_item.setHtml(
@@ -906,6 +1114,9 @@ class MainWindow(QMainWindow):
                 border: none;
                 spacing: 3px;
             }
+            QToolBar QToolButton {
+                padding: 4px 7px;
+            }
             QStatusBar {
                 background-color: #f0f0f0;
                 color: #222222;
@@ -1061,14 +1272,31 @@ class MainWindow(QMainWindow):
 
     def _load_file_paths(self, image_paths: List[Path]):
         """Загрузить список путей к изображениям"""
+        if getattr(self, "worker", None) and self.worker.isRunning():
+            self.statusBar().showMessage("Дождитесь завершения распознавания перед загрузкой новых файлов")
+            return
+        if getattr(self, "split_worker", None) and self.split_worker.isRunning():
+            self.statusBar().showMessage("Дождитесь завершения нарезки скана (Ножницы) перед загрузкой новых файлов")
+            return
         if not self._confirm_close():
             return
         self._cancel_adding()
+        self._clear_split_regions(update_ui=False)
         self.current_image = None
+        self.selected_wing_idx = -1
+        self._current_display_is_proxy = False
+        if hasattr(self, "view") and hasattr(self.view, "cancel_drawing"):
+            self.view.cancel_drawing()
+        self.point_items.clear()
+        self.wing_labels.clear()
+        self.bbox_items.clear()
+        self.measurement_lines.clear()
+        self.split_region_items.clear()
+        self.temp_add_items.clear()
         self.scene.clear()
         self._undo_stack.clear()
         self.images.clear()
-        self.file_list.clear()
+        clear_image_cache()
 
         seen = set()
         unique_paths = []
@@ -1078,26 +1306,33 @@ class MainWindow(QMainWindow):
                 seen.add(key)
                 unique_paths.append(p)
 
-        for idx, img_path in enumerate(unique_paths, start=1):
-            img_data = ImageData(path=img_path)
-            self.images[str(img_path)] = img_data
+        self.file_list.blockSignals(True)
+        try:
+            self.file_list.clear()
+            for idx, img_path in enumerate(unique_paths, start=1):
+                img_data = ImageData(path=img_path)
+                self.images[str(img_path)] = img_data
 
-            tps_path = self._find_tps_for_image(img_path)
-            if tps_path is not None:
-                self._load_tps_for_image(img_data, tps_path)
+                tps_path = self._find_tps_for_image(img_path)
+                if tps_path is not None:
+                    self._load_tps_for_image(img_data, tps_path)
 
-            has_data = "✓" if img_data.wings else "○"
-            item = QListWidgetItem(f"{has_data} {idx}) {img_path.name}")
-            item.setData(Qt.UserRole, str(img_path))
-            item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
-            item.setCheckState(Qt.Unchecked)
-            self.file_list.addItem(item)
+                has_data = "✓" if img_data.wings else "○"
+                item = QListWidgetItem(f"{has_data} {idx}) {img_path.name}")
+                item.setData(Qt.UserRole, str(img_path))
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Unchecked)
+                self.file_list.addItem(item)
+
+            if self.file_list.count() > 0:
+                self.file_list.setCurrentRow(0)
+        finally:
+            self.file_list.blockSignals(False)
 
         self._update_files_stats()
         self.batch_widget.update_batch_results(self.images)
 
         if self.file_list.count() > 0:
-            self.file_list.setCurrentRow(0)
             self._load_current_image()
             # На компьютерах с большим объёмом ОЗУ фоново прогреваем кэш сканов папки
             if (
@@ -1113,7 +1348,7 @@ class MainWindow(QMainWindow):
                     daemon=True,
                 ).start()
         else:
-            self._show_empty_canvas_hint()
+            self._reset_to_empty_state()
 
     @staticmethod
     def _tps_file_needs_excel_repair(tps_path: Path) -> bool:
@@ -1180,11 +1415,337 @@ class MainWindow(QMainWindow):
             print(f"Ошибка TPS: {e}")
 
     def _on_file_clicked(self, item):
-        """Обработка клика по файлу"""
+        """Обработка клика по файлу без повторной загрузки уже открытого файла."""
+        if not item:
+            return
+        path = item.data(Qt.UserRole)
+        if self.current_image is not None and path and str(self.current_image.path) == str(path):
+            return
         self._load_current_image()
 
+    def _on_file_row_changed(self, row: int):
+        """Переключение текущего файла стрелками вверх/вниз или кликом без двойной загрузки."""
+        if row < 0 or row >= self.file_list.count():
+            return
+        item = self.file_list.item(row)
+        if not item:
+            return
+        path = item.data(Qt.UserRole)
+        if not path or path not in self.images:
+            return
+        if self.current_image is not None and str(self.current_image.path) == str(path):
+            return
+        self._load_current_image()
+
+    def _get_checked_file_paths(self) -> List[str]:
+        """Вернуть пути файлов, отмеченных галочкой в левой панели."""
+        checked = []
+        for i in range(self.file_list.count()):
+            it = self.file_list.item(i)
+            if it is not None and it.checkState() == Qt.Checked:
+                p = it.data(Qt.UserRole)
+                if p:
+                    checked.append(str(p))
+        return checked
+
+    def _show_file_list_context_menu(self, pos):
+        """Контекстное меню ПКМ на списке файлов слева."""
+        item = self.file_list.itemAt(pos)
+        checked_paths = self._get_checked_file_paths()
+        if item is None and self.file_list.count() == 0:
+            return
+
+        menu = QMenu(self)
+        clicked_path = str(item.data(Qt.UserRole)) if item is not None and item.data(Qt.UserRole) else None
+
+        if clicked_path:
+            act_remove_one = menu.addAction("❌ Убрать файл из списка")
+            act_remove_one.triggered.connect(
+                lambda: self._remove_files_from_list([clicked_path], confirm=False)
+            )
+
+        if checked_paths:
+            act_remove_checked = menu.addAction(f"❌ Убрать отмеченные файлы ({len(checked_paths)})")
+            act_remove_checked.triggered.connect(
+                lambda: self._remove_files_from_list(checked_paths, confirm=True)
+            )
+
+        if self.file_list.count() > 0:
+            act_clear_all = menu.addAction("🧹 Очистить весь список файлов")
+            act_clear_all.triggered.connect(self._clear_file_list)
+
+        if clicked_path:
+            menu.addSeparator()
+            act_split = menu.addAction("✂ Разбить скан на семьи (Ножницы)")
+
+            def _open_and_split():
+                row = self.file_list.row(item)
+                if row >= 0:
+                    self.file_list.blockSignals(True)
+                    try:
+                        self.file_list.setCurrentRow(row)
+                    finally:
+                        self.file_list.blockSignals(False)
+                    if self.current_image is None or str(self.current_image.path) != clicked_path:
+                        self._load_current_image()
+                self.tab_widget.setCurrentIndex(0)
+                self._set_edit_mode(EditMode.SPLIT)
+
+            act_split.triggered.connect(_open_and_split)
+
+        menu.exec_(self.file_list.mapToGlobal(pos))
+
+    def _refresh_file_list_labels(self):
+        """Обновить нумерацию и маркеры готовности всех строк списка файлов."""
+        self.file_list.blockSignals(True)
+        try:
+            for idx in range(self.file_list.count()):
+                item = self.file_list.item(idx)
+                if item is None:
+                    continue
+                path_str = item.data(Qt.UserRole)
+                img_data = self.images.get(path_str)
+                if img_data is not None:
+                    mark = "✓" if img_data.wings else "○"
+                    item.setText(f"{mark} {idx + 1}) {img_data.path.name}")
+        finally:
+            self.file_list.blockSignals(False)
+        self._update_files_stats()
+
+    def _remove_files_action(self):
+        """Убрать отмеченные галочкой файлы или текущий файл из списка работы."""
+        checked_paths = self._get_checked_file_paths()
+        if checked_paths:
+            self._remove_files_from_list(checked_paths, confirm=True)
+        elif self.current_image is not None:
+            self._remove_current_file()
+        else:
+            self.statusBar().showMessage("Список файлов пуст")
+
+    def _remove_current_file(self):
+        """Убрать текущий файл из списка работы (исходный файл на диске сохраняется)."""
+        if self.current_image is None:
+            self.statusBar().showMessage("Нет выбранного файла для удаления из списка")
+            return
+        self._remove_files_from_list([str(self.current_image.path)], confirm=False)
+
+    def _clear_file_list(self):
+        """Очистить весь список файлов из рабочей области (файлы на диске не удаляются)."""
+        n = self.file_list.count()
+        if n == 0:
+            return
+        reply = QMessageBox.question(
+            self,
+            "Очистить список файлов",
+            f"Очистить весь список файлов ({n} шт.)?\nФайлы на диске останутся нетронутыми.",
+            QMessageBox.Yes | QMessageBox.No,
+            QMessageBox.No,
+        )
+        if reply != QMessageBox.Yes:
+            return
+        all_paths = [
+            str(self.file_list.item(i).data(Qt.UserRole))
+            for i in range(n)
+            if self.file_list.item(i) is not None and self.file_list.item(i).data(Qt.UserRole)
+        ]
+        self._remove_files_from_list(all_paths, confirm=False)
+
+    def _remove_files_from_list(self, paths_to_remove: List[str], confirm: bool = True) -> int:
+        """Убрать указанные файлы из левого списка и оперативной памяти (без удаления с диска)."""
+        if getattr(self, "worker", None) and self.worker.isRunning():
+            self.statusBar().showMessage("Дождитесь завершения распознавания перед удалением файлов из списка")
+            return 0
+        if getattr(self, "split_worker", None) and self.split_worker.isRunning():
+            self.statusBar().showMessage("Дождитесь завершения нарезки скана перед удалением файлов из списка")
+            return 0
+
+        targets: List[str] = []
+        seen = set()
+        for p in paths_to_remove:
+            ps = str(p)
+            if ps in self.images and ps not in seen:
+                seen.add(ps)
+                targets.append(ps)
+        if not targets:
+            return 0
+
+        if confirm:
+            reply = QMessageBox.question(
+                self,
+                "Убрать файлы из списка",
+                f"Убрать выбранные файлы ({len(targets)} шт.) из списка?\nИсходные файлы на диске не удаляются.",
+                QMessageBox.Yes | QMessageBox.No,
+                QMessageBox.Yes,
+            )
+            if reply != QMessageBox.Yes:
+                return 0
+
+        modified_targets = [self.images[p] for p in targets if self.images[p].is_modified]
+        if modified_targets:
+            reply = QMessageBox.question(
+                self,
+                "Сохранить?",
+                f"Есть {len(modified_targets)} несохранённых файлов среди убираемых. Сохранить перед удалением из списка?",
+                QMessageBox.Save | QMessageBox.Discard | QMessageBox.Cancel,
+            )
+            if reply == QMessageBox.Cancel:
+                return 0
+            if reply == QMessageBox.Save:
+                for img_data in modified_targets:
+                    if not self._save_tps(img_data):
+                        return 0
+
+        old_current_row = self.file_list.currentRow()
+        target_set = set(targets)
+        removing_current = (
+            self.current_image is not None and str(self.current_image.path) in target_set
+        )
+
+        self.file_list.blockSignals(True)
+        try:
+            for row in range(self.file_list.count() - 1, -1, -1):
+                it = self.file_list.item(row)
+                if it is not None and str(it.data(Qt.UserRole)) in target_set:
+                    self.file_list.takeItem(row)
+        finally:
+            self.file_list.blockSignals(False)
+
+        for p in targets:
+            self.images.pop(p, None)
+            try:
+                evict_image_cache(p)
+            except Exception:
+                pass
+
+        self._undo_stack = [
+            (p, w) for (p, w) in self._undo_stack if str(p) not in target_set
+        ]
+
+        self._refresh_file_list_labels()
+
+        if self.file_list.count() == 0:
+            self._reset_to_empty_state()
+        elif removing_current:
+            self.current_image = None
+            next_row = min(max(0, old_current_row), self.file_list.count() - 1)
+            self.file_list.blockSignals(True)
+            try:
+                self.file_list.setCurrentRow(next_row)
+            finally:
+                self.file_list.blockSignals(False)
+            self._load_current_image()
+        elif self.current_image is not None:
+            cur_p = str(self.current_image.path)
+            self.file_list.blockSignals(True)
+            try:
+                for row in range(self.file_list.count()):
+                    it = self.file_list.item(row)
+                    if it is not None and str(it.data(Qt.UserRole)) == cur_p:
+                        self.file_list.setCurrentRow(row)
+                        break
+            finally:
+                self.file_list.blockSignals(False)
+
+        self.batch_widget.update_batch_results(self.images)
+        self._update_interpretation_widgets()
+        if self.single_wing_mode:
+            self._update_analysis_widget()
+
+        self.statusBar().showMessage(
+            f"Убрано из списка: {len(targets)} файл(ов). Исходные файлы на диске сохранены."
+        )
+        return len(targets)
+
+    def _reset_to_empty_state(self):
+        """Полностью сбросить рабочую область в пустое состояние после очистки списка файлов."""
+        self._cancel_adding()
+        self._clear_split_regions(update_ui=False)
+        if hasattr(self, "view") and hasattr(self.view, "cancel_drawing"):
+            self.view.cancel_drawing()
+        self.current_image = None
+        self.selected_wing_idx = -1
+        self._current_display_is_proxy = False
+        self.point_items.clear()
+        self.wing_labels.clear()
+        self.bbox_items.clear()
+        self.measurement_lines.clear()
+        self.split_region_items.clear()
+        self.temp_add_items.clear()
+        self._show_empty_canvas_hint()
+
+        self.lbl_filename.setText("Файл: -")
+        self.lbl_size.setText("Размер: -")
+        self.lbl_wings_count.setText("Крыльев: 0")
+        self._update_wings_table()
+        self.wing_guide.set_active_point(None)
+        self._update_analysis_widget()
+        self._update_interpretation_widgets()
+        self.batch_widget.update_batch_results(self.images)
+        self._update_files_stats()
+        self._update_split_bar_counter()
+        self._set_edit_mode(EditMode.VIEW)
+        if hasattr(self, "split_bar"):
+            self.split_bar.setVisible(False)
+
+    def _append_image_paths(
+        self,
+        image_paths: List[Path],
+        insert_after_path: Optional[str] = None,
+        check_new: bool = True,
+        uncheck_source: bool = False,
+    ) -> List[str]:
+        """Добавить новые изображения в текущий список файлов без очистки уже открытых."""
+        insert_row = self.file_list.count()
+        if insert_after_path is not None:
+            target_after = str(insert_after_path)
+            for row in range(self.file_list.count()):
+                it = self.file_list.item(row)
+                if it is not None and str(it.data(Qt.UserRole)) == target_after:
+                    if uncheck_source:
+                        it.setCheckState(Qt.Unchecked)
+                    insert_row = row + 1
+                    break
+
+        result_paths: List[str] = []
+        self.file_list.blockSignals(True)
+        try:
+            for p in image_paths:
+                img_path = Path(p)
+                path_str = str(img_path)
+                if path_str in self.images:
+                    if check_new:
+                        for row in range(self.file_list.count()):
+                            it = self.file_list.item(row)
+                            if it is not None and str(it.data(Qt.UserRole)) == path_str:
+                                it.setCheckState(Qt.Checked)
+                                break
+                    result_paths.append(path_str)
+                    continue
+
+                img_data = ImageData(path=img_path)
+                self.images[path_str] = img_data
+
+                tps_path = self._find_tps_for_image(img_path)
+                if tps_path is not None:
+                    self._load_tps_for_image(img_data, tps_path)
+
+                has_data = "✓" if img_data.wings else "○"
+                item = QListWidgetItem(f"{has_data} {insert_row + 1}) {img_path.name}")
+                item.setData(Qt.UserRole, path_str)
+                item.setFlags(item.flags() | Qt.ItemIsUserCheckable)
+                item.setCheckState(Qt.Checked if check_new else Qt.Unchecked)
+                self.file_list.insertItem(insert_row, item)
+                insert_row += 1
+                result_paths.append(path_str)
+        finally:
+            self.file_list.blockSignals(False)
+
+        self._refresh_file_list_labels()
+        self.batch_widget.update_batch_results(self.images)
+        return result_paths
+
     def _load_current_image(self):
-        """Загрузить текущее изображение"""
+        """Загрузить текущее изображение (с авто-прокси для гигантских сканов 432 МП)."""
         item = self.file_list.currentItem()
         if not item:
             return
@@ -1195,21 +1756,30 @@ class MainWindow(QMainWindow):
 
         self.current_image = self.images[path]
 
-        pixmap = read_pixmap(path)
-        self.current_image.width = pixmap.width()
-        self.current_image.height = pixmap.height()
+        pixmap, orig_w, orig_h, scale_x, scale_y = read_pixmap_for_display(path)
+        self.current_image.width = orig_w
+        self.current_image.height = orig_h
+        self._current_display_is_proxy = (scale_x > 1.001 or scale_y > 1.001)
 
         self._cancel_adding()
+        self.split_regions.clear()
+        self.split_region_items.clear()
         self.selected_wing_idx = -1
-        self.scene.clear()
+        if hasattr(self, "view") and hasattr(self.view, "cancel_drawing"):
+            self.view.cancel_drawing()
         self.point_items.clear()
         self.wing_labels.clear()
         self.bbox_items.clear()
         self.measurement_lines.clear()
+        self.scene.clear()
 
         pixmap_item = QGraphicsPixmapItem(pixmap)
+        if scale_x != 1.0 or scale_y != 1.0:
+            pixmap_item.setTransform(QTransform.fromScale(scale_x, scale_y))
         self.scene.addItem(pixmap_item)
-        self.scene.setSceneRect(pixmap_item.boundingRect())
+        self.scene.setSceneRect(0, 0, orig_w, orig_h)
+
+        self._update_split_bar_counter()
 
         self.current_image.analyze_all_wings()
 
@@ -1222,51 +1792,117 @@ class MainWindow(QMainWindow):
     def _transform_current_image_orientation(self, mode: str):
         """
         Повернуть или отразить текущий файл изображения на диске (с пересчётом координат точек и рамок).
-        mode: 'cw90' (90° по часовой), 'rot180' (180°), 'fliph' (зеркально по горизонтали).
+        mode: 'ccw90' (90° влево), 'cw90' (90° вправо), 'rot180' (180°), 'fliph' (зеркально по горизонтали).
         """
+        if getattr(self, "worker", None) and self.worker.isRunning():
+            self.statusBar().showMessage("Дождитесь завершения распознавания перед поворотом изображения")
+            return
+        if getattr(self, "split_worker", None) and self.split_worker.isRunning():
+            self.statusBar().showMessage("Дождитесь завершения нарезки скана перед поворотом изображения")
+            return
         if not self.current_image or not self.current_image.path:
             self.statusBar().showMessage("Сначала откройте и выберите изображение в списке слева")
             return
         img_path = Path(self.current_image.path)
         if not img_path.exists():
             return
+        if mode not in ("ccw90", "cw90", "rot180", "fliph"):
+            return
 
+        err_exc = None
+        tmp_path = None
+        label_ru = ""
+        QApplication.setOverrideCursor(Qt.WaitCursor)
         try:
             from PIL import Image, ImageOps
-            import tempfile
 
-            with Image.open(img_path) as im:
-                im = ImageOps.exif_transpose(im)
-                old_w, old_h = im.size
-                if mode == "cw90":
-                    im_out = im.transpose(Image.Transpose.ROTATE_270)
-                    label_ru = "повёрнуто на 90° вправо"
-                elif mode == "rot180":
-                    im_out = im.transpose(Image.Transpose.ROTATE_180)
-                    label_ru = "развёрнуто на 180°"
-                elif mode == "fliph":
-                    im_out = im.transpose(Image.Transpose.FLIP_LEFT_RIGHT)
-                    label_ru = "отражено по горизонтали"
-                else:
-                    return
+            Image.MAX_IMAGE_PIXELS = None
+            transpose_ns = getattr(Image, "Transpose", Image)
+            suffix = img_path.suffix or ".jpg"
+            suffix_low = suffix.lower()
 
-                suffix = img_path.suffix or ".jpg"
-                fd, tmp_path = tempfile.mkstemp(prefix=img_path.name + ".", suffix=suffix, dir=img_path.parent)
-                os.close(fd)
+            with Image.open(img_path) as im_orig:
+                im = im_orig
+                raw_dpi = im_orig.info.get("dpi")
+                orient = 1
                 try:
-                    save_kwargs = {"quality": 95} if suffix.lower() in (".jpg", ".jpeg") else {}
-                    im_out.save(tmp_path, **save_kwargs)
-                    os.replace(tmp_path, img_path)
+                    orient = im_orig.getexif().get(274, 1)
+                except Exception:
+                    orient = 1
+                if orient != 1:
+                    im = ImageOps.exif_transpose(im_orig)
+                    raw_dpi = im.info.get("dpi") or raw_dpi
+
+                try:
+                    old_w, old_h = im.size
+                    if mode == "ccw90":
+                        im_out = im.transpose(transpose_ns.ROTATE_90)
+                        label_ru = "повёрнуто на 90° влево"
+                    elif mode == "cw90":
+                        im_out = im.transpose(transpose_ns.ROTATE_270)
+                        label_ru = "повёрнуто на 90° вправо"
+                    elif mode == "rot180":
+                        im_out = im.transpose(transpose_ns.ROTATE_180)
+                        label_ru = "развёрнуто на 180°"
+                    else:
+                        im_out = im.transpose(transpose_ns.FLIP_LEFT_RIGHT)
+                        label_ru = "отражено по горизонтали"
+
+                    try:
+                        new_w, new_h = im_out.size
+                        if suffix_low in (".jpg", ".jpeg") and im_out.mode in ("RGBA", "LA", "P", "PA"):
+                            im_rgb = im_out.convert("RGB")
+                            im_out.close()
+                            im_out = im_rgb
+
+                        fd, tmp_path = tempfile.mkstemp(
+                            prefix=img_path.name + ".",
+                            suffix=suffix,
+                            dir=img_path.parent,
+                        )
+                        os.close(fd)
+
+                        save_kwargs = {"quality": 95} if suffix_low in (".jpg", ".jpeg") else {}
+                        if suffix_low != ".webp" and isinstance(raw_dpi, (tuple, list)) and len(raw_dpi) == 2:
+                            try:
+                                dx, dy = float(raw_dpi[0]), float(raw_dpi[1])
+                                if math.isfinite(dx) and math.isfinite(dy) and dx > 0 and dy > 0:
+                                    save_kwargs["dpi"] = (dx, dy)
+                            except (TypeError, ValueError):
+                                pass
+
+                        im_out.save(tmp_path, **save_kwargs)
+                    finally:
+                        try:
+                            im_out.close()
+                        except Exception:
+                            pass
                 finally:
-                    if os.path.exists(tmp_path):
-                        os.unlink(tmp_path)
+                    if im is not im_orig:
+                        try:
+                            im.close()
+                        except Exception:
+                            pass
+
+            # Исходный файл и временный объект полностью закрыты до os.replace (критично для Windows)
+            os.replace(tmp_path, img_path)
+            tmp_path = None
+
+            max_x = float(max(0, new_w - 1))
+            max_y = float(max(0, new_h - 1))
 
             def _map_xy(x: float, y: float):
-                if mode == "cw90":
-                    return float(old_h - y), float(x)
-                if mode == "rot180":
-                    return float(old_w - x), float(old_h - y)
-                return float(old_w - x), float(y)
+                if not (math.isfinite(x) and math.isfinite(y)):
+                    return x, y
+                if mode == "ccw90":
+                    nx, ny = float(y), float(old_w - x)
+                elif mode == "cw90":
+                    nx, ny = float(old_h - y), float(x)
+                elif mode == "rot180":
+                    nx, ny = float(old_w - x), float(old_h - y)
+                else:
+                    nx, ny = float(old_w - x), float(y)
+                return max(0.0, min(max_x, nx)), max(0.0, min(max_y, ny))
 
             for wing in self.current_image.wings:
                 for attr in ("points", "points_yolo", "points_stage1", "points_stage2", "points_gt"):
@@ -1282,14 +1918,34 @@ class MainWindow(QMainWindow):
                     wing.bbox.x2 = max(bx1, bx2)
                     wing.bbox.y2 = max(by1, by2)
 
-            self.current_image.is_modified = True
+            cur_keys = {str(img_path), str(self.current_image.path)}
+            self._undo_stack = [entry for entry in self._undo_stack if entry[0] not in cur_keys]
+
+            has_wings = bool(self.current_image.wings)
+            if has_wings:
+                self.current_image.is_modified = True
+            evict_image_cache(img_path)
             self._load_current_image()
-            self._auto_save_tps(self.current_image)
+            if has_wings:
+                self._auto_save_tps(self.current_image)
             self.statusBar().showMessage(
                 f"Изображение {img_path.name} {label_ru}. Нажмите «⚡ Обработать» для распознавания крыльев."
             )
         except Exception as exc:
-            QMessageBox.warning(self, "Поворот изображения", f"Не удалось повернуть изображение:\n{exc}")
+            err_exc = exc
+        finally:
+            if tmp_path and os.path.exists(tmp_path):
+                try:
+                    os.unlink(tmp_path)
+                except OSError:
+                    pass
+            QApplication.restoreOverrideCursor()
+
+        if err_exc is not None:
+            QMessageBox.warning(self, "Поворот изображения", f"Не удалось повернуть изображение:\n{err_exc}")
+
+    def _rotate_current_image_ccw(self):
+        self._transform_current_image_orientation("ccw90")
 
     def _rotate_current_image_cw(self):
         self._transform_current_image_orientation("cw90")
@@ -1300,18 +1956,350 @@ class MainWindow(QMainWindow):
     def _flip_current_image_h(self):
         self._transform_current_image_orientation("fliph")
 
+    # --- Инструмент «Ножницы» (EditMode.SPLIT): разбивка общего скана на семьи ---
+
+    def _set_split_controls_enabled(self, enabled: bool):
+        """Включить или отключить кнопки панели Ножниц на время работы фонового воркера."""
+        for attr in ("btn_split_auto", "btn_split_grid_h", "btn_split_grid_v", "btn_split_clear"):
+            ctrl = getattr(self, attr, None)
+            if ctrl is not None:
+                ctrl.setEnabled(enabled)
+        btn_apply = getattr(self, "btn_split_apply", None)
+        if btn_apply is not None:
+            btn_apply.setEnabled(enabled and len(self.split_regions) > 0)
+
+    def _update_split_bar_counter(self):
+        """Обновить счётчик областей и доступность кнопки нарезки."""
+        count = len(self.split_regions)
+        split_running = bool(getattr(self, "split_worker", None) and self.split_worker.isRunning())
+        if hasattr(self, "btn_split_apply"):
+            self.btn_split_apply.setText(f"✂ Разрезать ({count})")
+            self.btn_split_apply.setEnabled(count > 0 and not split_running)
+
+    def _clamp_split_coords(self, x1: float, y1: float, x2: float, y2: float) -> Tuple[float, float, float, float]:
+        nx1, nx2 = min(float(x1), float(x2)), max(float(x1), float(x2))
+        ny1, ny2 = min(float(y1), float(y2)), max(float(y1), float(y2))
+        if self.current_image and self.current_image.width > 0 and self.current_image.height > 0:
+            w = float(self.current_image.width)
+            h = float(self.current_image.height)
+            nx1 = max(0.0, min(w, nx1))
+            nx2 = max(0.0, min(w, nx2))
+            ny1 = max(0.0, min(h, ny1))
+            ny2 = max(0.0, min(h, ny2))
+        return nx1, ny1, nx2, ny2
+
+    def _sync_split_ui(self):
+        """Перестроить элементы SplitRegionItem на сцене по self.split_regions."""
+        for item in self.split_region_items:
+            try:
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except RuntimeError:
+                pass
+        self.split_region_items.clear()
+
+        visible = (self.edit_mode == EditMode.SPLIT)
+        for idx, reg in enumerate(self.split_regions):
+            item = SplitRegionItem(
+                reg.x1, reg.y1, reg.x2, reg.y2,
+                region_idx=idx,
+                name=reg.name or f"Семья_{idx + 1}",
+            )
+            item.setVisible(visible)
+            self.scene.addItem(item)
+            self.split_region_items.append(item)
+
+        self._update_split_bar_counter()
+        if hasattr(self.view, "_sync_minimap"):
+            self.view._sync_minimap()
+
+    def _on_split_region_created(self, x1: float, y1: float, x2: float, y2: float):
+        """Обработка создания новой области резки на сцене."""
+        if not self.current_image:
+            return
+        cx1, cy1, cx2, cy2 = self._clamp_split_coords(x1, y1, x2, y2)
+        if (cx2 - cx1) < 15 or (cy2 - cy1) < 15:
+            return
+        name = f"Семья_{len(self.split_regions) + 1}"
+        self.split_regions.append(SplitRegion(cx1, cy1, cx2, cy2, name=name))
+        self._sync_split_ui()
+        self.statusBar().showMessage(
+            f"Добавлена область #{len(self.split_regions)} ({name}). Всего областей: {len(self.split_regions)}"
+        )
+
+    def _on_split_region_changed(self, region_idx: int, x1: float, y1: float, x2: float, y2: float):
+        """Обработка перемещения или изменения размера области резки."""
+        if not (0 <= region_idx < len(self.split_regions)):
+            return
+        cx1, cy1, cx2, cy2 = self._clamp_split_coords(x1, y1, x2, y2)
+        reg = self.split_regions[region_idx]
+        reg.x1, reg.y1, reg.x2, reg.y2 = cx1, cy1, cx2, cy2
+        if 0 <= region_idx < len(self.split_region_items):
+            item = self.split_region_items[region_idx]
+            try:
+                if hasattr(item, "set_scene_bounds"):
+                    item.set_scene_bounds(cx1, cy1, cx2, cy2)
+                item.update_label(region_idx, reg.name)
+            except RuntimeError:
+                pass
+        self._update_split_bar_counter()
+        if hasattr(self.view, "_sync_minimap"):
+            self.view._sync_minimap()
+
+    def _on_split_region_delete(self, region_idx: int):
+        """Удалить область резки по индексу."""
+        if not (0 <= region_idx < len(self.split_regions)):
+            return
+        del self.split_regions[region_idx]
+        self._sync_split_ui()
+
+    def _on_split_region_rename(self, region_idx: int):
+        """Переименовать область резки (название семьи/улья)."""
+        if not (0 <= region_idx < len(self.split_regions)):
+            return
+        reg = self.split_regions[region_idx]
+        new_name, ok = QInputDialog.getText(
+            self,
+            "Название семьи",
+            f"Введите номер или название для области #{region_idx + 1} (например: №Б, №28, Улей_5):",
+            text=reg.name or f"Семья_{region_idx + 1}",
+        )
+        if ok:
+            cleaned = new_name.strip()
+            if cleaned:
+                reg.name = cleaned
+                self._sync_split_ui()
+
+    def _clear_split_regions(self, update_ui: bool = True):
+        """Очистить все области резки на сцене."""
+        self.split_regions.clear()
+        for item in self.split_region_items:
+            try:
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except RuntimeError:
+                pass
+        self.split_region_items.clear()
+        if update_ui:
+            self._update_split_bar_counter()
+            if hasattr(self.view, "_sync_minimap"):
+                self.view._sync_minimap()
+
+    def _apply_split_grid(self, orientation: str):
+        """Разметить текущий скан регулярной сеткой полос или колонок."""
+        if not self.current_image or self.current_image.width <= 0 or self.current_image.height <= 0:
+            self.statusBar().showMessage("Сначала откройте изображение для разбивки сеткой")
+            return
+        count = int(self.spin_split_count.value())
+        w = int(self.current_image.width)
+        h = int(self.current_image.height)
+        self.split_regions = list(generate_grid_regions(w, h, count, orientation=orientation))
+        self._sync_split_ui()
+        kind_ru = "горизонтальных полос" if orientation == "horizontal" else "вертикальных колонок"
+        self.lbl_split_hint.setText(
+            f"Создана сетка: {len(self.split_regions)} {kind_ru}. "
+            "Подвиньте границы рамок мышкой при необходимости, двойной клик - переименовать семью."
+        )
+
+    def _auto_detect_split_regions(self):
+        """Автоматически найти области семей на общем скане по белым зазорам."""
+        if not self.current_image or not self.current_image.path or not self.current_image.path.exists():
+            self.statusBar().showMessage("Сначала откройте существующий файл скана")
+            return
+        QApplication.setOverrideCursor(Qt.WaitCursor)
+        try:
+            info = detect_family_regions(self.current_image.path)
+        except Exception as exc:
+            QMessageBox.warning(self, "Авто-поиск семей", f"Не удалось проанализировать скан:\n{exc}")
+            return
+        finally:
+            QApplication.restoreOverrideCursor()
+
+        regions = list(info.get("regions") or [])
+        self.split_regions = regions
+        self._sync_split_ui()
+
+        suggested_rot = info.get("suggested_rotation", "none") or "none"
+        rot_idx = self.combo_split_rotation.findData(suggested_rot)
+        if rot_idx >= 0:
+            self.combo_split_rotation.setCurrentIndex(rot_idx)
+
+        hint_orient = str(info.get("orientation_hint", "") or "").strip()
+        if hint_orient and not hint_orient.endswith((".", "!", "?")):
+            hint_orient += "."
+        axis = info.get("axis")
+
+        if axis == "none":
+            msg = (
+                "Автоматические зазоры между семьями не найдены - предложена область всего скана "
+                "(можно обвести семьи вручную мышкой или выбрать сетку «≡ Полосы» / «||| Колонки»)."
+            )
+            if hint_orient:
+                msg += f" {hint_orient}"
+        elif regions:
+            msg = f"✨ Найдено областей семей: {len(regions)}."
+            if hint_orient:
+                msg += f" {hint_orient}"
+            msg += " Проверьте рамки (двойной клик - переименовать) и нажмите «✂ Разрезать»."
+        else:
+            msg = (
+                "Белые зазоры между семьями не обнаружены автоматически. "
+                "Обведите семьи рамками вручную или воспользуйтесь кнопками «≡ Полосы» / «||| Колонки»."
+            )
+        self.lbl_split_hint.setText(msg)
+        self.statusBar().showMessage(msg)
+
+    def _apply_split_regions(self):
+        """Запустить фоновую нарезку выбранных областей семей в отдельные файлы."""
+        if not self.current_image or not self.current_image.path or not self.current_image.path.exists():
+            self.statusBar().showMessage("Сначала откройте файл скана")
+            return
+        if not self.split_regions:
+            self.statusBar().showMessage("Сначала выделите хотя бы одну область семьи на скане")
+            return
+        if getattr(self, "worker", None) and self.worker.isRunning():
+            self.statusBar().showMessage("Дождитесь завершения распознавания изображений")
+            return
+        if getattr(self, "split_worker", None) and self.split_worker.isRunning():
+            self.statusBar().showMessage("Нарезка скана уже выполняется")
+            return
+
+        rot_mode = self.combo_split_rotation.currentData() or "none"
+        auto_proc = self.chk_split_auto_process.isChecked()
+        self._split_src_path_str = str(self.current_image.path)
+        self._split_auto_process = auto_proc
+
+        self.progress_bar.setVisible(True)
+        self.progress_bar.setRange(0, len(self.split_regions))
+        self.progress_bar.setValue(0)
+        self._set_split_controls_enabled(False)
+
+        self.split_worker = SplitWorker(
+            self.current_image.path,
+            copy.deepcopy(self.split_regions),
+            rotation_mode=rot_mode,
+            wings=copy.deepcopy(self.current_image.wings),
+        )
+        self.split_worker.progress.connect(self._on_progress)
+        self.split_worker.finished.connect(self._on_split_finished)
+        self.split_worker.error.connect(self._on_split_error)
+        self.split_worker.start()
+
+    def _on_split_finished(self, created_items):
+        """Завершение фоновой нарезки скана: сохранение перенесённых TPS и добавление файлов в список."""
+        self.progress_bar.setVisible(False)
+        self.split_worker = None
+        self._set_split_controls_enabled(True)
+        src_path_str = self._split_src_path_str or (
+            str(self.current_image.path) if self.current_image is not None else None
+        )
+        auto_proc = self._split_auto_process
+        self._split_src_path_str = None
+        self._split_auto_process = False
+
+        if not created_items:
+            self.statusBar().showMessage("Не создано ни одного файла семьи")
+            return
+
+        created_paths: List[Path] = []
+        for out_path_raw, transferred_wings in created_items:
+            out_path = Path(out_path_raw)
+            created_paths.append(out_path)
+            if transferred_wings:
+                try:
+                    w_img, h_img = image_size(out_path)
+                except Exception:
+                    w_img, h_img = 0, 0
+                if w_img <= 0 or h_img <= 0:
+                    continue
+                valid_wings = []
+                for w in transferred_wings:
+                    pts = w.get_active_points()
+                    if len(pts) == NUM_POINTS and all(
+                        math.isfinite(x) and math.isfinite(y) for x, y in pts
+                    ):
+                        valid_wings.append(w)
+                if not valid_wings:
+                    continue
+                tmp_img = ImageData(
+                    path=out_path,
+                    wings=valid_wings,
+                    width=w_img,
+                    height=h_img,
+                )
+                tmp_img.analyze_all_wings()
+                try:
+                    tps_path = out_path.with_suffix(".tps")
+                    self._snap_wings_to_integer_pixels(tmp_img, include_gt=True)
+                    save_tps_from_image(tmp_img, tps_path)
+                    save_project(tmp_img, tps_path)
+                except Exception:
+                    pass
+
+        added_paths = self._append_image_paths(
+            created_paths,
+            insert_after_path=src_path_str,
+            check_new=True,
+            uncheck_source=True,
+        )
+
+        still_on_src = (
+            self.current_image is None
+            or (src_path_str is not None and str(self.current_image.path) == src_path_str)
+        )
+        if still_on_src:
+            self._clear_split_regions(update_ui=True)
+            self._set_edit_mode(EditMode.VIEW)
+            if added_paths:
+                first_path = added_paths[0]
+                self.file_list.blockSignals(True)
+                try:
+                    for row in range(self.file_list.count()):
+                        it = self.file_list.item(row)
+                        if it is not None and str(it.data(Qt.UserRole)) == first_path:
+                            self.file_list.setCurrentRow(row)
+                            break
+                finally:
+                    self.file_list.blockSignals(False)
+                self._load_current_image()
+
+        self.statusBar().showMessage(
+            f"✂ Создано файлов семей: {len(created_items)} (отмечены ✓ в списке слева). "
+            "Нажмите «⚡ Обработать» для распознавания!"
+        )
+
+        if auto_proc and added_paths:
+            self._process_images([Path(p) for p in added_paths])
+
+    def _on_split_error(self, msg: str):
+        """Обработка ошибки нарезки скана."""
+        self.progress_bar.setVisible(False)
+        self.split_worker = None
+        self._set_split_controls_enabled(True)
+        self._split_src_path_str = None
+        self._split_auto_process = False
+        QMessageBox.warning(self, "Разбивка скана (Ножницы)", f"Не удалось разрезать скан:\n{msg}")
+
     def _prev_file(self):
         """Предыдущий файл"""
         row = self.file_list.currentRow()
         if row > 0:
-            self.file_list.setCurrentRow(row - 1)
+            self.file_list.blockSignals(True)
+            try:
+                self.file_list.setCurrentRow(row - 1)
+            finally:
+                self.file_list.blockSignals(False)
             self._load_current_image()
 
     def _next_file(self):
         """Следующий файл"""
         row = self.file_list.currentRow()
         if row < self.file_list.count() - 1:
-            self.file_list.setCurrentRow(row + 1)
+            self.file_list.blockSignals(True)
+            try:
+                self.file_list.setCurrentRow(row + 1)
+            finally:
+                self.file_list.blockSignals(False)
             self._load_current_image()
 
     def _select_all_files(self):
@@ -1443,19 +2431,35 @@ class MainWindow(QMainWindow):
             return
 
         for item in self.point_items:
-            self.scene.removeItem(item)
+            try:
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except RuntimeError:
+                pass
         self.point_items.clear()
 
         for label in self.wing_labels:
-            self.scene.removeItem(label)
+            try:
+                if label.scene() is self.scene:
+                    self.scene.removeItem(label)
+            except RuntimeError:
+                pass
         self.wing_labels.clear()
 
         for bbox in self.bbox_items:
-            self.scene.removeItem(bbox)
+            try:
+                if bbox.scene() is self.scene:
+                    self.scene.removeItem(bbox)
+            except RuntimeError:
+                pass
         self.bbox_items.clear()
 
         for line in self.measurement_lines:
-            self.scene.removeItem(line)
+            try:
+                if line.scene() is self.scene:
+                    self.scene.removeItem(line)
+            except RuntimeError:
+                pass
         self.measurement_lines.clear()
 
         # Размер точек строго соответствует настройке (по умолчанию radius=1 px -> диаметр 2 px),
@@ -1602,7 +2606,10 @@ class MainWindow(QMainWindow):
         self._update_wings_table()
 
         self.lbl_filename.setText(f"Файл: {self.current_image.path.name}")
-        self.lbl_size.setText(f"{self.current_image.width}×{self.current_image.height}")
+        if getattr(self, "_current_display_is_proxy", False):
+            self.lbl_size.setText(f"{self.current_image.width}×{self.current_image.height} (быстрый просмотр)")
+        else:
+            self.lbl_size.setText(f"{self.current_image.width}×{self.current_image.height}")
 
         total_wings = len(self.current_image.wings)
         enabled_wings = [w for w in self.current_image.wings if getattr(w, "is_enabled", True)]
@@ -1747,8 +2754,23 @@ class MainWindow(QMainWindow):
         self.act_mode_edit.setChecked(mode == EditMode.EDIT)
         self.act_mode_add.setChecked(mode == EditMode.ADD)
         self.act_mode_bbox.setChecked(mode == EditMode.BBOX)
+        if hasattr(self, "act_mode_split"):
+            self.act_mode_split.setChecked(mode == EditMode.SPLIT)
+
+        if hasattr(self, "split_bar"):
+            self.split_bar.setVisible(mode == EditMode.SPLIT)
+        for item in self.split_region_items:
+            try:
+                item.setVisible(mode == EditMode.SPLIT)
+            except RuntimeError:
+                pass
 
         self.lbl_mode.setText(f"Режим: {mode.value}")
+
+        if mode == EditMode.SPLIT and self.current_image is None:
+            if hasattr(self, "lbl_split_hint"):
+                self.lbl_split_hint.setText("Сначала откройте общий скан со списком семей")
+            self.statusBar().showMessage("Сначала откройте общий скан со списком семей")
 
         if mode == EditMode.ADD:
             self.wing_guide.set_active_point(0)
@@ -1784,6 +2806,7 @@ class MainWindow(QMainWindow):
             image.is_modified = True
             image.analyze_all_wings()
             self._auto_save_tps(image)
+            self._refresh_file_list_labels()
             if image is self.current_image:
                 self._update_display()
                 self._update_analysis_widget()
@@ -1857,6 +2880,7 @@ class MainWindow(QMainWindow):
         self._auto_save_tps(self.current_image)
         self.chk_bbox.setChecked(True)
         self._update_display()
+        self._refresh_file_list_labels()
         self._update_analysis_widget()
         self._update_interpretation_widgets()
         self.batch_widget.update_batch_results(self.images)
@@ -1985,6 +3009,7 @@ class MainWindow(QMainWindow):
                 self._update_display()
                 self._update_analysis_widget()
                 self._update_interpretation_widgets()
+                self.batch_widget.update_batch_results(self.images)
         else:
             reply = QMessageBox.question(
                 self, "Удаление", f"Удалить крыло №{wing_idx + 1}?",
@@ -1992,11 +3017,16 @@ class MainWindow(QMainWindow):
             )
             if reply == QMessageBox.Yes:
                 self._remember_edit()
+                self._cancel_adding()
                 del self.current_image.wings[wing_idx]
+                self.selected_wing_idx = -1
                 self.current_image.is_modified = True
                 self.current_image.analyze_all_wings()
                 self._auto_save_tps(self.current_image)
                 self._update_display()
+                self._refresh_file_list_labels()
+                if not self.current_image.wings:
+                    self.wing_guide.set_active_point(None)
                 self._update_analysis_widget()
                 self._update_interpretation_widgets()
                 self.batch_widget.update_batch_results(self.images)
@@ -2006,10 +3036,25 @@ class MainWindow(QMainWindow):
         self._on_point_delete(wing_idx, -1)
 
     def _delete_selected_wing(self):
-        """Удалить выбранное крыло"""
+        """Удалить выбранное крыло (или выделенную область Ножниц в режиме SPLIT)."""
+        focus_w = QApplication.focusWidget()
+        if isinstance(focus_w, (QSpinBox, QLineEdit, QTextEdit, QComboBox)):
+            return
+        if self.edit_mode == EditMode.SPLIT:
+            for item in list(self.split_region_items):
+                try:
+                    if item.isSelected():
+                        self._on_split_region_delete(item.region_idx)
+                        return
+                except RuntimeError:
+                    pass
         row = self.wings_table.currentRow()
-        if row >= 0:
-            self._on_point_delete(row, -1)
+        if row < 0 and self.current_image and 0 <= self.selected_wing_idx < len(self.current_image.wings):
+            row = self.selected_wing_idx
+        if row < 0:
+            self.statusBar().showMessage("Сначала выберите крыло в таблице справа или кликните по его точке на скане")
+            return
+        self._on_point_delete(row, -1)
 
     def _on_scene_clicked(self, x: float, y: float):
         """Клик по сцене в режиме ADD: сначала дозаполняет пропущенную точку (NaN), иначе создаёт новое крыло из 8 точек"""
@@ -2075,6 +3120,7 @@ class MainWindow(QMainWindow):
             self._auto_save_tps(self.current_image)
             self._cancel_adding()
             self._update_display()
+            self._refresh_file_list_labels()
             self._update_analysis_widget()
             self._update_interpretation_widgets()
             self.batch_widget.update_batch_results(self.images)
@@ -2085,7 +3131,11 @@ class MainWindow(QMainWindow):
         """Отмена добавления"""
         self.adding_points.clear()
         for item in self.temp_add_items:
-            self.scene.removeItem(item)
+            try:
+                if item.scene() is self.scene:
+                    self.scene.removeItem(item)
+            except RuntimeError:
+                pass
         self.temp_add_items.clear()
 
     def _cancel_action(self):
@@ -2119,6 +3169,9 @@ class MainWindow(QMainWindow):
         """Обработать изображения"""
         if getattr(self, 'worker', None) and self.worker.isRunning():
             self.statusBar().showMessage('Обработка уже выполняется')
+            return
+        if getattr(self, 'split_worker', None) and self.split_worker.isRunning():
+            self.statusBar().showMessage('Дождитесь завершения нарезки скана (Ножницы)')
             return
         if any(self.images[str(p)].wings for p in paths if str(p) in self.images):
             if QMessageBox.question(
@@ -2186,15 +3239,7 @@ class MainWindow(QMainWindow):
                 else:
                     zero_wing_files.append(img_data.path.name)
 
-        for i in range(self.file_list.count()):
-            item = self.file_list.item(i)
-            path = item.data(Qt.UserRole)
-            if path in self.images and self.images[path].wings:
-                text = item.text()
-                if text.startswith("○"):
-                    item.setText("✓" + text[1:])
-
-        self._update_files_stats()
+        self._refresh_file_list_labels()
         self._update_display()
         self._update_analysis_widget()
         self._update_interpretation_widgets()
@@ -2211,7 +3256,9 @@ class MainWindow(QMainWindow):
                 "• Слишком размытое, тёмное или бликующее фото (рекомендуется скан на светлом фоне от 1200 DPI);\n"
                 "• Крылья соприкасаются друг с другом или обрезаны краем кадра.\n\n"
                 "💡 Что делать:\n"
-                "Нажмите кнопку «⬜ Рамка» на верхней панели и обведите крыло прямоугольником — "
+                "• Если крылья на скане расположены вертикально или вверх ногами - нажмите «↺ -90°», «↻ 90°» или «🔄 180°» на верхней панели;\n"
+                "• Если на одном листе отсканировано сразу 5-10 семей - нажмите «✂ Ножницы» рядом с кнопками поворота, чтобы разрезать лист на отдельные файлы семей;\n"
+                "• Или нажмите кнопку «⬜ Рамка» на верхней панели и обведите крыло прямоугольником - "
                 "программа расставит внутри него 8 точек!"
             )
 
@@ -2462,14 +3509,22 @@ class MainWindow(QMainWindow):
     def _auto_save_tps(self, img_data: Optional[ImageData] = None) -> bool:
         """Автоматически синхронизировать .tps файл на диске после распознавания или редактирования точек."""
         target = img_data or self.current_image
-        if not target or not target.path or not target.wings:
+        if not target or not target.path:
             return False
         tps_existing = self._find_tps_for_image(target.path)
         if not target.path.exists() and tps_existing is None:
             return False
         enabled_wings = [w for w in target.wings if getattr(w, "is_enabled", True)]
-        if not enabled_wings:
-            return False
+        if not target.wings or not enabled_wings:
+            if tps_existing is None:
+                return False
+            try:
+                save_tps_from_image(target, tps_existing)
+                save_project(target, tps_existing)
+                target.is_modified = False
+                return True
+            except Exception:
+                return False
         for w in enabled_wings:
             pts = w.get_active_points()
             if len(pts) != 8 or not all(math.isfinite(x) and math.isfinite(y) for x, y in pts):
@@ -2669,6 +3724,9 @@ class MainWindow(QMainWindow):
             f"<h3 style='margin-top:0; color:#1864ab;'>НейроКрылья v{html.escape(APP_VERSION)}</h3>"
             "<p><b>Основные возможности текущей версии:</b></p>"
             "<ul>"
+            "<li>✂ <b>Инструмент «Ножницы», поворот «↺ -90°» и управление списком файлов:</b> "
+            "нарезка общих многосемейных сканов (5-10 семей на одном листе) с автопоиском и сеткой, "
+            "поворот скана на 90° влево/вправо, 180° и отражение, а также быстрое удаление лишних файлов из левой панели (кнопка 🗑 / Ctrl+W) без удаления с диска.</li>"
             "<li>📊 <b>3 варианта визуала графиков:</b> включая точный вид 1:1 как в Excel «Порода по крыльям в. 2.5» "
             "(сводная матрица 2×2 и вариационные кривые по шкалам Карташёва).</li>"
             "<li>🏆 <b>Поиск лучших пчёл семьи:</b> трёхэтапная фильтрация ядра породы (CI → DsA → HI) по алгоритму «Лучшая пчела».</li>"
@@ -3075,18 +4133,24 @@ class MainWindow(QMainWindow):
         dialog.exec_()
 
     def closeEvent(self, event):
-        """Закрытие окна с безопасным таймаутом ожидания фоновых потоков (2000 мс)"""
+        """Закрытие окна с безопасным таймаутом ожидания фоновых потоков"""
         if self._skip_unsaved_prompt or self._confirm_close():
+            split_w = getattr(self, 'split_worker', None)
+            seen_workers = set()
             for worker in (
                 getattr(self, 'worker', None),
+                split_w,
                 self._update_check_worker,
                 self._update_download_worker,
                 *self.findChildren(QThread),
             ):
-                if worker and worker.isRunning():
-                    if hasattr(worker, 'stop'):
-                        worker.stop()
-                    worker.wait(2000)
+                if worker and id(worker) not in seen_workers:
+                    seen_workers.add(id(worker))
+                    if worker.isRunning():
+                        if hasattr(worker, 'stop'):
+                            worker.stop()
+                        wait_ms = 10000 if worker is split_w else 2000
+                        worker.wait(wait_ms)
             event.accept()
             return
         event.ignore()

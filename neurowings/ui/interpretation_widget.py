@@ -10,7 +10,7 @@ import numpy as np
 from PyQt5.QtCore import QThread, pyqtSignal
 from PyQt5.QtWidgets import (
     QWidget, QVBoxLayout, QHBoxLayout, QLabel, QTextEdit,
-    QPushButton, QComboBox, QFileDialog, QMessageBox
+    QPushButton, QComboBox, QFileDialog, QMessageBox, QSizePolicy
 )
 
 from ..core.constants import BREEDS, BREED_NAMES_RU, format_breed_ru
@@ -84,43 +84,60 @@ class InterpretationWidget(QWidget):
     def _setup_ui(self):
         layout = QVBoxLayout(self)
 
-        header = QHBoxLayout()
+        header = QVBoxLayout()
+        header.setSpacing(6)
+
+        header_row1 = QHBoxLayout()
         title = QLabel(self.title_text)
         title.setStyleSheet("font-size: 16px; font-weight: bold; color: #2c5aa0;")
-        header.addWidget(title)
-        header.addStretch()
-
-        lbl_target = QLabel("Целевая порода для оценки:")
-        lbl_target.setStyleSheet("font-weight: bold; color: #222222;")
-        header.addWidget(lbl_target)
-
-        self.breed_combo = QComboBox()
-        self.breed_combo.addItem("Авто (по преобладающей породе)", "auto")
-        for b_key, b_name_ru in BREED_NAMES_RU.items():
-            self.breed_combo.addItem(b_name_ru, b_key)
-        self.breed_combo.currentIndexChanged.connect(self._on_breed_combo_changed)
-        header.addWidget(self.breed_combo)
-
-        # Режим анализа: Чистопородная / Свободноспаренная
-        lbl_mode = QLabel("Режим:")
-        lbl_mode.setStyleSheet("font-weight: bold; color: #222222; margin-left: 10px;")
-        header.addWidget(lbl_mode)
-
-        self.mating_combo = QComboBox()
-        self.mating_combo.addItem("🐝 Чистопородная (строгий)", "purebred")
-        self.mating_combo.addItem("🔀 Свободноспаренная (мягкий)", "free_mated")
-        self.mating_combo.setToolTip(
-            "Чистопородная — строгие границы для племенных маток.\n"
-            "Свободноспаренная — допускаются бо́льшие отклонения (±15% к границам пород)."
-        )
-        self.mating_combo.currentIndexChanged.connect(self._on_mating_mode_changed)
-        header.addWidget(self.mating_combo)
+        header_row1.addWidget(title)
+        header_row1.addStretch()
 
         self.btn_pdf = QPushButton("📄 PDF-Паспорт")
         self.btn_pdf.setToolTip("Сохранить одностраничный сертификат (паспорт) пчелосемьи в PDF")
         self.btn_pdf.clicked.connect(self._export_pdf)
-        header.addWidget(self.btn_pdf)
+        header_row1.addWidget(self.btn_pdf)
+        header.addLayout(header_row1)
 
+        header_row2 = QHBoxLayout()
+        header_row2.setSpacing(6)
+
+        lbl_target = QLabel("Целевая порода:")
+        lbl_target.setStyleSheet("font-weight: bold; color: #222222;")
+        header_row2.addWidget(lbl_target)
+
+        self.breed_combo = QComboBox()
+        self.breed_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.breed_combo.setMinimumContentsLength(14)
+        self.breed_combo.setMaximumWidth(280)
+        self.breed_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.breed_combo.addItem("Авто (по преобладающей породе)", "auto")
+        for b_key, b_name_ru in BREED_NAMES_RU.items():
+            self.breed_combo.addItem(b_name_ru, b_key)
+        self.breed_combo.currentIndexChanged.connect(self._on_breed_combo_changed)
+        header_row2.addWidget(self.breed_combo)
+
+        # Режим анализа: Чистопородная / Свободноспаренная
+        lbl_mode = QLabel("Режим:")
+        lbl_mode.setStyleSheet("font-weight: bold; color: #222222; margin-left: 8px;")
+        header_row2.addWidget(lbl_mode)
+
+        self.mating_combo = QComboBox()
+        self.mating_combo.setSizeAdjustPolicy(QComboBox.AdjustToMinimumContentsLengthWithIcon)
+        self.mating_combo.setMinimumContentsLength(14)
+        self.mating_combo.setMaximumWidth(260)
+        self.mating_combo.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        self.mating_combo.addItem("🐝 Чистопородная (строгий)", "purebred")
+        self.mating_combo.addItem("🔀 Свободноспаренная (мягкий)", "free_mated")
+        self.mating_combo.setToolTip(
+            "Чистопородная - строгие границы для племенных маток.\n"
+            "Свободноспаренная - допускаются бо́льшие отклонения (±15% к границам пород)."
+        )
+        self.mating_combo.currentIndexChanged.connect(self._on_mating_mode_changed)
+        header_row2.addWidget(self.mating_combo)
+        header_row2.addStretch()
+
+        header.addLayout(header_row2)
         layout.addLayout(header)
 
         self.text_edit = QTextEdit()

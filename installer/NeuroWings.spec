@@ -114,8 +114,6 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[str(base_dir / 'installer' / 'runtime_hook_torch_dll.py')],
     excludes=[
-        'PIL.AvifImagePlugin',
-        'PIL._avif',
         'scipy',       # Если не используется
         'pandas',      # Если не используется
         # Optional Pillow AVIF support is unused by NeuroWings and has

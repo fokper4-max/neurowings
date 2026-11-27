@@ -3,6 +3,7 @@
 """Workers package."""
 
 from .processing import ProcessingWorker
+from .split import SplitWorker
 from .update import UpdateCheckWorker, UpdateDownloadWorker
 
-__all__ = ['ProcessingWorker', 'UpdateCheckWorker', 'UpdateDownloadWorker']
+__all__ = ['ProcessingWorker', 'SplitWorker', 'UpdateCheckWorker', 'UpdateDownloadWorker']

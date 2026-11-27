@@ -5,9 +5,9 @@
 ; Настройки
 
 !define PRODUCT_NAME "НейроКрылья"
-!define PRODUCT_VERSION "2.2.0"
+!define PRODUCT_VERSION "2.3.0"
 !define PRODUCT_PUBLISHER "Команда НейроКрылья"
-!define PRODUCT_WEB_SITE "https://github.com/yourusername/neurowings"
+!define PRODUCT_WEB_SITE "https://github.com/fokper4-max/neurowings"
 !define PRODUCT_UNINST_KEY "Software\Microsoft\Windows\CurrentVersion\Uninstall\${PRODUCT_NAME}"
 !define PRODUCT_UNINST_ROOT_KEY "HKLM"
 

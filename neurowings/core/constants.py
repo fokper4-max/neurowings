@@ -12,7 +12,7 @@ from PyQt5.QtGui import QColor
 # =============================================================================
 
 APP_NAME = "НейроКрылья"
-APP_VERSION = "2.2.2"  # Гарантированный целочисленный TPS для Макрос3 Excel в. 2.5, авто-лечение старых .tps и надёжный OneFile-апдейтер
+APP_VERSION = "2.3.0"  # Инструмент «Ножницы» для сканов 5-10 семей, авто-поиск семей, поворот -90°, поддержка 432+ МП сканов, удаление файлов из списка
 APP_AUTHOR = "Дмитрий Дубровский"
 APP_MAX_URL = "https://max.ru/u/f9LHodD0cOIbZcReW1B_n2lDumCww_8mo2-Kjv_3dok65ZPHlJWUNkq-MVo"
 APP_TELEGRAM_LABEL = "@NeuroWings_bee"

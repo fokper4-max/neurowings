@@ -3,10 +3,12 @@
 """
 NeuroWings - Графические элементы для сцены (v2.2.0)
 
-Улучшения для экранов высокого разрешения (до 5160x2160) и больших сканов (24–36 МП):
+Улучшения для экранов высокого разрешения (до 5160x2160) и больших сканов (24-36 МП):
 - Расширенная зона захвата мышью (shape() и boundingRect() с hit_radius >= max(radius * 2.5, 8.0))
 - Адаптивный размер шрифта номеров точек и номеров крыльев
 """
+
+from typing import Tuple
 
 from PyQt5.QtWidgets import (
     QGraphicsEllipseItem, QGraphicsRectItem, QGraphicsLineItem,
@@ -50,7 +52,7 @@ class PointItem(QGraphicsEllipseItem):
 
         self.update_style()
 
-        # Подпись точки — ВСЕГДА локальный номер точки на крыле (1..8)!
+        # Подпись точки - ВСЕГДА локальный номер точки на крыле (1..8)!
         # Для дополнительных оверлейных точек (global_idx < 0) номер не показываем.
         if global_idx >= 0:
             local_num = (point_idx + 1) if 0 <= point_idx < 8 else (global_idx % 8 + 1)
@@ -295,3 +297,295 @@ class MeasurementLineItem(QGraphicsLineItem):
         super().__init__(x1, y1, x2, y2)
         self.setPen(QPen(color, width, style))
         self.setZValue(90)
+
+
+class SplitResizeHandle(QGraphicsRectItem):
+    """Экранная ручка ресайза области разбиения (12x12 px на любом зуме)."""
+
+    def __init__(self, position: str, parent=None):
+        super().__init__(-6, -6, 12, 12, parent)
+        self.position = position  # 'tl', 'tr', 'bl', 'br', 't', 'b', 'l', 'r'
+        self.setFlag(QGraphicsRectItem.ItemIgnoresTransformations, True)
+        self.setFlag(QGraphicsRectItem.ItemIsMovable, False)
+        self.setFlag(QGraphicsRectItem.ItemIsSelectable, False)
+        self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
+        self.setBrush(QBrush(QColor(255, 255, 255)))
+        self.setPen(QPen(QColor(0, 120, 215), 2))
+        self.setZValue(252)
+        self.setCursor(self._get_cursor())
+
+    def _get_cursor(self):
+        cursors = {
+            'tl': Qt.SizeFDiagCursor, 'tr': Qt.SizeBDiagCursor,
+            'bl': Qt.SizeBDiagCursor, 'br': Qt.SizeFDiagCursor,
+            't': Qt.SizeVerCursor, 'b': Qt.SizeVerCursor,
+            'l': Qt.SizeHorCursor, 'r': Qt.SizeHorCursor,
+        }
+        return cursors.get(self.position, Qt.ArrowCursor)
+
+    def mousePressEvent(self, event):
+        parent = self.parentItem()
+        if event.button() == Qt.LeftButton and isinstance(parent, SplitRegionItem):
+            parent._begin_resize(self.position, event.scenePos())
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        parent = self.parentItem()
+        if isinstance(parent, SplitRegionItem) and parent._resizing:
+            parent._apply_resize(event.scenePos())
+            event.accept()
+            return
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        parent = self.parentItem()
+        if isinstance(parent, SplitRegionItem) and parent._resizing:
+            parent._end_resize()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+
+
+class SplitRegionItem(QGraphicsRectItem):
+    """Область разбиения большого скана на отдельную семью (режим Ножницы)."""
+
+    _LABEL_OFFSET_X = 12.0
+    _LABEL_OFFSET_Y = 10.0
+    _MIN_SIZE = 21.0
+
+    def __init__(self, x1: float, y1: float, x2: float, y2: float,
+                 region_idx: int = 0, name: str = ""):
+        super().__init__(min(x1, x2), min(y1, y2), abs(x2 - x1), abs(y2 - y1))
+        self.region_idx = int(region_idx)
+        clean_name = (name or "").strip()
+        self.region_name = clean_name if clean_name else f"Семья_{self.region_idx + 1}"
+
+        self.setPen(self._make_pen(QColor(0, 145, 234), 3))
+        self.setBrush(QBrush(QColor(0, 145, 234, 28)))
+        self.setZValue(250)
+        self.setAcceptHoverEvents(True)
+        self.setFlag(QGraphicsRectItem.ItemIsSelectable, True)
+        self.setFlag(QGraphicsRectItem.ItemIsMovable, True)
+        self.setFlag(QGraphicsRectItem.ItemSendsGeometryChanges, True)
+        self.setAcceptedMouseButtons(Qt.LeftButton | Qt.RightButton)
+
+        # Читаемая плашка с подписью в экранных пикселях на любом зуме
+        self.label_bg = QGraphicsRectItem(self)
+        self.label_bg.setFlag(QGraphicsRectItem.ItemIgnoresTransformations, True)
+        self.label_bg.setBrush(QBrush(QColor(255, 255, 255, 230)))
+        self.label_bg.setPen(QPen(QColor(0, 120, 215), 1.5))
+        self.label_bg.setZValue(251)
+
+        self.label = QGraphicsSimpleTextItem(self.label_bg)
+        self.label.setFont(QFont("Arial", 10, QFont.Bold))
+        self.label.setBrush(QBrush(QColor(0, 80, 160)))
+        self.label.setPos(self._LABEL_OFFSET_X, self._LABEL_OFFSET_Y)
+
+        self.handles = {}
+        for pos in ('tl', 'tr', 'bl', 'br', 't', 'b', 'l', 'r'):
+            self.handles[pos] = SplitResizeHandle(pos, self)
+
+        self._resizing = False
+        self._resize_handle = None
+        self._resize_start_rect = None
+        self._resize_start_pos = None
+        self._press_scene_rect = None
+
+        self._update_handles()
+
+    @staticmethod
+    def _make_pen(color: QColor, width: float) -> QPen:
+        pen = QPen(color, width, Qt.DashLine)
+        pen.setCosmetic(True)
+        return pen
+
+    def _update_label_text(self):
+        r = self.rect()
+        w = int(round(r.width()))
+        h = int(round(r.height()))
+        self.label.setText(f"✂ {self.region_idx + 1}: {self.region_name} ({w}x{h})")
+        br = self.label.boundingRect().adjusted(-6, -3, 6, 3)
+        self.label_bg.setRect(br.translated(self._LABEL_OFFSET_X, self._LABEL_OFFSET_Y))
+
+    def update_label(self, new_idx: int, new_name=None):
+        """Обновить индекс и (опционально) название области семьи."""
+        self.region_idx = int(new_idx)
+        if new_name is not None:
+            clean_name = str(new_name).strip()
+            self.region_name = clean_name if clean_name else f"Семья_{self.region_idx + 1}"
+        self._update_label_text()
+
+    def get_scene_bounds(self) -> Tuple[float, float, float, float]:
+        """Вернуть (x1, y1, x2, y2) области в координатах сцены."""
+        r = self.mapRectToScene(self.rect())
+        return (r.left(), r.top(), r.right(), r.bottom())
+
+    def set_scene_bounds(self, x1: float, y1: float, x2: float, y2: float):
+        """Задать границы области в координатах сцены и синхронизировать ручки и плашку."""
+        self.setPos(0.0, 0.0)
+        nx1, nx2 = min(float(x1), float(x2)), max(float(x1), float(x2))
+        ny1, ny2 = min(float(y1), float(y2)), max(float(y1), float(y2))
+        self.setRect(QRectF(nx1, ny1, max(1.0, nx2 - nx1), max(1.0, ny2 - ny1)))
+
+    def _update_handles(self):
+        r = self.rect()
+        positions = {
+            'tl': (r.left(), r.top()),
+            'tr': (r.right(), r.top()),
+            'bl': (r.left(), r.bottom()),
+            'br': (r.right(), r.bottom()),
+            't': (r.center().x(), r.top()),
+            'b': (r.center().x(), r.bottom()),
+            'l': (r.left(), r.center().y()),
+            'r': (r.right(), r.center().y()),
+        }
+        for pos, (x, y) in positions.items():
+            if pos in self.handles:
+                self.handles[pos].setPos(x, y)
+        if hasattr(self, "label_bg") and self.label_bg is not None:
+            self.label_bg.setPos(r.left(), r.top())
+            self._update_label_text()
+
+    def setRect(self, *args):
+        super().setRect(*args)
+        self._update_handles()
+
+    def _find_hit_handle(self, scene_pos):
+        """Найти ближайшую ручку в пределах 10 экранных пикселей (работает при любом зуме)."""
+        view = self.scene().views()[0] if (self.scene() and self.scene().views()) else None
+        best_pos = None
+        best_dist = None
+        if view is not None:
+            click_vp = view.mapFromScene(scene_pos)
+            for pos, handle in self.handles.items():
+                h_vp = view.mapFromScene(handle.scenePos())
+                dx = abs(click_vp.x() - h_vp.x())
+                dy = abs(click_vp.y() - h_vp.y())
+                if dx <= 10 and dy <= 10:
+                    dist_sq = dx * dx + dy * dy
+                    if best_dist is None or dist_sq < best_dist:
+                        best_dist = dist_sq
+                        best_pos = pos
+        else:
+            for pos, handle in self.handles.items():
+                h_pos = handle.scenePos()
+                dx = abs(scene_pos.x() - h_pos.x())
+                dy = abs(scene_pos.y() - h_pos.y())
+                if dx <= 10 and dy <= 10:
+                    dist_sq = dx * dx + dy * dy
+                    if best_dist is None or dist_sq < best_dist:
+                        best_dist = dist_sq
+                        best_pos = pos
+        return best_pos
+
+    def _begin_resize(self, handle_pos: str, scene_pos):
+        self._press_scene_rect = self.mapRectToScene(self.rect())
+        self._resizing = True
+        self._resize_handle = handle_pos
+        self._resize_start_rect = QRectF(self.rect())
+        self._resize_start_pos = scene_pos
+
+    def _apply_resize(self, scene_pos):
+        if not (self._resizing and self._resize_handle and self._resize_start_rect is not None):
+            return
+        delta = scene_pos - self._resize_start_pos
+        r = self._resize_start_rect
+
+        left = r.left()
+        right = r.right()
+        top = r.top()
+        bottom = r.bottom()
+
+        if 'l' in self._resize_handle:
+            left = r.left() + delta.x()
+            if right - left < self._MIN_SIZE:
+                left = right - self._MIN_SIZE
+        if 'r' in self._resize_handle:
+            right = r.right() + delta.x()
+            if right - left < self._MIN_SIZE:
+                right = left + self._MIN_SIZE
+        if 't' in self._resize_handle:
+            top = r.top() + delta.y()
+            if bottom - top < self._MIN_SIZE:
+                top = bottom - self._MIN_SIZE
+        if 'b' in self._resize_handle:
+            bottom = r.bottom() + delta.y()
+            if bottom - top < self._MIN_SIZE:
+                bottom = top + self._MIN_SIZE
+
+        new_rect = QRectF(left, top, right - left, bottom - top).normalized()
+        if new_rect.width() > 20 and new_rect.height() > 20:
+            super().setRect(new_rect)
+            self._update_handles()
+
+    def _emit_region_changed(self, force: bool = False):
+        if self.scene() and hasattr(self.scene(), 'views') and self.scene().views():
+            view = self.scene().views()[0]
+            r = self.mapRectToScene(self.rect())
+            old = self._press_scene_rect
+            changed = (
+                old is None
+                or abs(r.left() - old.left()) > 0.5
+                or abs(r.top() - old.top()) > 0.5
+                or abs(r.right() - old.right()) > 0.5
+                or abs(r.bottom() - old.bottom()) > 0.5
+            )
+            if (force or changed) and hasattr(view, 'split_region_changed'):
+                view.split_region_changed.emit(
+                    self.region_idx,
+                    r.left(), r.top(),
+                    r.right(), r.bottom()
+                )
+        self._press_scene_rect = None
+
+    def _end_resize(self):
+        was_resizing = self._resizing
+        self._resizing = False
+        self._resize_handle = None
+        self._emit_region_changed(force=was_resizing)
+
+    def mousePressEvent(self, event):
+        self._press_scene_rect = self.mapRectToScene(self.rect())
+        if event.button() == Qt.LeftButton:
+            hit_pos = self._find_hit_handle(event.scenePos())
+            if hit_pos is not None:
+                self._begin_resize(hit_pos, event.scenePos())
+                event.accept()
+                return
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if self._resizing and self._resize_handle:
+            self._apply_resize(event.scenePos())
+            event.accept()
+        else:
+            super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        """Эмитируем split_region_changed только если область изменилась или шла трансформация."""
+        if self._resizing:
+            self._end_resize()
+            event.accept()
+            return
+        super().mouseReleaseEvent(event)
+        self._emit_region_changed(force=False)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.LeftButton:
+            if self.scene() and hasattr(self.scene(), 'views') and self.scene().views():
+                view = self.scene().views()[0]
+                if hasattr(view, 'split_region_rename_requested'):
+                    view.split_region_rename_requested.emit(self.region_idx)
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+    def hoverEnterEvent(self, event):
+        self.setPen(self._make_pen(QColor(0, 180, 255), 4))
+        super().hoverEnterEvent(event)
+
+    def hoverLeaveEvent(self, event):
+        self.setPen(self._make_pen(QColor(0, 145, 234), 3))
+        super().hoverLeaveEvent(event)

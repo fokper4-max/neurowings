@@ -46,6 +46,8 @@ from .hardware_profiler import (
     HardwareProfiler, HardwareSpecs, ComputeProfile, POWER_MODES
 )
 
+from .image_split import SplitRegion
+
 __all__ = [
     # models (torch first)
     'TORCH_AVAILABLE', 'TORCH_IMPORT_ERROR',
@@ -75,4 +77,6 @@ __all__ = [
     'ColonyAnalysisService', 'ColonyAnalysisResult', 'analyze_colony',
     # hardware_profiler
     'HardwareProfiler', 'HardwareSpecs', 'ComputeProfile', 'POWER_MODES',
+    # image_split
+    'SplitRegion',
 ]

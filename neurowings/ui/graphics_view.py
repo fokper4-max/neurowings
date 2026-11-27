@@ -11,7 +11,7 @@ from PyQt5.QtCore import Qt, pyqtSignal, QPoint, QRectF
 from PyQt5.QtGui import QPainter, QPen, QBrush, QColor, QCursor, QPixmap
 
 from ..core.data_models import EditMode
-from .graphics_items import PointItem, BBoxItem
+from .graphics_items import PointItem, BBoxItem, SplitRegionItem, SplitResizeHandle
 
 
 def _make_crosshair_cursor(color: QColor, size: int = 25, thickness: int = 2) -> QCursor:
@@ -50,6 +50,7 @@ def _make_crosshair_cursor(color: QColor, size: int = 25, thickness: int = 2) ->
 _CURSOR_EDIT = None
 _CURSOR_ADD = None
 _CURSOR_BBOX = None
+_CURSOR_SPLIT = None
 
 
 def _get_cached_cursors():
@@ -60,6 +61,24 @@ def _get_cached_cursors():
         _CURSOR_ADD = _make_crosshair_cursor(QColor(255, 255, 0), 25, 2)     # жёлтый
         _CURSOR_BBOX = _make_crosshair_cursor(QColor(0, 255, 100), 25, 2)    # зелёный
     return _CURSOR_EDIT, _CURSOR_ADD, _CURSOR_BBOX
+
+
+def _get_split_cursor():
+    """Ленивая инициализация курсора для режима Ножницы (разбиение скана на семьи)."""
+    global _CURSOR_SPLIT
+    if _CURSOR_SPLIT is None:
+        _CURSOR_SPLIT = _make_crosshair_cursor(QColor(0, 180, 255), 25, 2)
+    return _CURSOR_SPLIT
+
+
+def _find_split_region_item(item):
+    """Подняться по parentItem() и вернуть SplitRegionItem (для самой области, ручек и подписи)."""
+    cur = item
+    while cur is not None:
+        if isinstance(cur, SplitRegionItem):
+            return cur
+        cur = cur.parentItem()
+    return None
 
 
 class ZoomableGraphicsView(QGraphicsView):
@@ -76,6 +95,10 @@ class ZoomableGraphicsView(QGraphicsView):
     bbox_delete_requested = pyqtSignal(int)
     wing_reset_requested = pyqtSignal(int)
     bbox_recognize_requested = pyqtSignal(int)
+    split_region_created = pyqtSignal(float, float, float, float)
+    split_region_changed = pyqtSignal(int, float, float, float, float)
+    split_region_delete_requested = pyqtSignal(int)
+    split_region_rename_requested = pyqtSignal(int)
 
     def __init__(self, scene, parent=None):
         super().__init__(scene, parent)
@@ -104,17 +127,72 @@ class ZoomableGraphicsView(QGraphicsView):
         if self.scene() is not None:
             self.scene().sceneRectChanged.connect(lambda _: self._sync_minimap())
 
+    def _is_split_mode(self) -> bool:
+        split_mode = getattr(EditMode, "SPLIT", None)
+        return split_mode is not None and self.edit_mode == split_mode
+
+    def _create_draft_rect(self, is_split: bool) -> QGraphicsRectItem:
+        rect_item = QGraphicsRectItem()
+        if is_split:
+            pen = QPen(QColor(0, 145, 234), 3, Qt.DashLine)
+            pen.setCosmetic(True)
+            rect_item.setPen(pen)
+            rect_item.setBrush(QBrush(QColor(0, 145, 234, 35)))
+            rect_item.setZValue(255)
+        else:
+            rect_item.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
+            rect_item.setBrush(QBrush(QColor(0, 255, 0, 30)))
+        return rect_item
+
+    def _find_split_region_at(self, pos):
+        """Найти видимую SplitRegionItem под экранной точкой pos среди всех элементов сверху вниз."""
+        for it in self.items(pos):
+            split_item = _find_split_region_item(it)
+            if split_item is not None and split_item.isVisible():
+                return split_item
+        return None
+
+    def cancel_drawing(self):
+        """Безопасно отменить текущее рисование рамки/области и перетаскивание точки."""
+        rect_item = self._bbox_rect
+        self._bbox_rect = None
+        self._bbox_start = None
+        self._dragging_point = None
+        self._drag_start_pos = None
+        if rect_item is not None:
+            try:
+                scene = self.scene()
+                if scene is not None and rect_item.scene() == scene:
+                    scene.removeItem(rect_item)
+            except RuntimeError:
+                pass
+
     def _show_context_menu(self, pos):
         """Показать контекстное меню"""
+        split_item = self._find_split_region_at(pos) if self._is_split_mode() else None
         item = self.itemAt(pos)
-        if item is not None and isinstance(item.parentItem(), PointItem):
-            item = item.parentItem()
-        elif item is not None and isinstance(item.parentItem(), BBoxItem):
-            item = item.parentItem()
+        if split_item is None:
+            split_item = _find_split_region_item(item)
+        if split_item is None:
+            if item is not None and isinstance(item.parentItem(), PointItem):
+                item = item.parentItem()
+            elif item is not None and isinstance(item.parentItem(), BBoxItem):
+                item = item.parentItem()
 
         menu = QMenu(self)
 
-        if isinstance(item, PointItem) and item.global_idx >= 0:
+        if split_item is not None:
+            idx = split_item.region_idx
+            act_rename = menu.addAction(f"✏ Переименовать семью (область №{idx + 1})...")
+            act_rename.triggered.connect(
+                lambda: self.split_region_rename_requested.emit(idx)
+            )
+            menu.addSeparator()
+            act_delete = menu.addAction(f"🗑 Удалить область №{idx + 1}")
+            act_delete.triggered.connect(
+                lambda: self.split_region_delete_requested.emit(idx)
+            )
+        elif isinstance(item, PointItem) and item.global_idx >= 0:
             act_reset = menu.addAction(f"🔄 Сбросить точки крыла №{item.wing_idx + 1} (к нейросети/TPS)")
             act_reset.triggered.connect(
                 lambda: self.wing_reset_requested.emit(item.wing_idx)
@@ -145,13 +223,11 @@ class ZoomableGraphicsView(QGraphicsView):
 
     def set_edit_mode(self, mode: EditMode):
         """Установить режим редактирования с яркими контрастными курсорами"""
-        if self._bbox_rect is not None and self.scene() is not None:
-            self.scene().removeItem(self._bbox_rect)
-        self._bbox_start = None
-        self._bbox_rect = None
+        self.cancel_drawing()
 
         self.edit_mode = mode
         cur_edit, cur_add, cur_bbox = _get_cached_cursors()
+        split_mode = getattr(EditMode, "SPLIT", None)
         if mode == EditMode.VIEW:
             self.setDragMode(QGraphicsView.ScrollHandDrag)
             self.setCursor(Qt.OpenHandCursor)
@@ -168,6 +244,11 @@ class ZoomableGraphicsView(QGraphicsView):
             self.setDragMode(QGraphicsView.NoDrag)
             self.setCursor(cur_bbox)
             self.viewport().setCursor(cur_bbox)
+        elif split_mode is not None and mode == split_mode:
+            cur_split = _get_split_cursor()
+            self.setDragMode(QGraphicsView.NoDrag)
+            self.setCursor(cur_split)
+            self.viewport().setCursor(cur_split)
 
     def _add_scroll_buttons(self):
         self.btn_up = QToolButton(self)
@@ -246,44 +327,78 @@ class ZoomableGraphicsView(QGraphicsView):
             return self._last_mouse_pos
         return self.viewport().mapFromGlobal(QCursor.pos())
 
+    def trigger_keyboard_place(self) -> bool:
+        """Выполнить клавиатурный клик под курсором (Space/Enter) в режимах ADD, BBOX и SPLIT."""
+        if self.edit_mode == EditMode.ADD:
+            cursor_pos = self._current_cursor_viewport_pos()
+            scene_pos = self.mapToScene(cursor_pos)
+            self.scene_clicked.emit(scene_pos.x(), scene_pos.y())
+            return True
+
+        if self.edit_mode == EditMode.BBOX or self._is_split_mode():
+            is_split = self._is_split_mode()
+            cursor_pos = self._current_cursor_viewport_pos()
+            scene_pos = self.mapToScene(cursor_pos)
+            scene = self.scene()
+            if scene is None:
+                self.cancel_drawing()
+                return True
+
+            if self._bbox_start is None:
+                self.cancel_drawing()
+                self._bbox_start = scene_pos
+                self._bbox_rect = self._create_draft_rect(is_split)
+                scene.addItem(self._bbox_rect)
+            elif self._bbox_rect is not None:
+                rect_item = self._bbox_rect
+                start_pos = self._bbox_start
+                self._bbox_start = None
+                self._bbox_rect = None
+                rect = None
+                try:
+                    if rect_item.scene() != scene:
+                        raise RuntimeError("draft rect no longer in scene")
+                    x1 = min(start_pos.x(), scene_pos.x())
+                    y1 = min(start_pos.y(), scene_pos.y())
+                    x2 = max(start_pos.x(), scene_pos.x())
+                    y2 = max(start_pos.y(), scene_pos.y())
+                    rect_item.setRect(x1, y1, x2 - x1, y2 - y1)
+                    rect = rect_item.rect()
+                    scene.removeItem(rect_item)
+                except RuntimeError:
+                    rect = None
+
+                if rect is not None:
+                    min_size = 15 if is_split else 10
+                    if rect.width() > min_size and rect.height() > min_size:
+                        if is_split:
+                            self.split_region_created.emit(
+                                rect.x(), rect.y(),
+                                rect.x() + rect.width(),
+                                rect.y() + rect.height()
+                            )
+                        else:
+                            self.bbox_created.emit(
+                                rect.x(), rect.y(),
+                                rect.x() + rect.width(),
+                                rect.y() + rect.height()
+                            )
+            else:
+                self._bbox_start = None
+            return True
+
+        return False
+
     def keyPressEvent(self, event):
         key = event.key()
         speed = 50
 
-        # Space/Enter = «клик» под курсором (режимы ADD и BBOX)
+        # Space/Enter = «клик» под курсором (режимы ADD, BBOX и SPLIT)
         if key in (Qt.Key_Space, Qt.Key_Return, Qt.Key_Enter):
             if event.isAutoRepeat():
                 return
-            if self.edit_mode == EditMode.ADD:
-                cursor_pos = self._current_cursor_viewport_pos()
-                scene_pos = self.mapToScene(cursor_pos)
-                self.scene_clicked.emit(scene_pos.x(), scene_pos.y())
-                return
-            elif self.edit_mode == EditMode.BBOX:
-                cursor_pos = self._current_cursor_viewport_pos()
-                scene_pos = self.mapToScene(cursor_pos)
-                if self._bbox_start is None:
-                    self._bbox_start = scene_pos
-                    self._bbox_rect = QGraphicsRectItem()
-                    self._bbox_rect.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
-                    self._bbox_rect.setBrush(QBrush(QColor(0, 255, 0, 30)))
-                    self.scene().addItem(self._bbox_rect)
-                elif self._bbox_rect is not None:
-                    x1 = min(self._bbox_start.x(), scene_pos.x())
-                    y1 = min(self._bbox_start.y(), scene_pos.y())
-                    x2 = max(self._bbox_start.x(), scene_pos.x())
-                    y2 = max(self._bbox_start.y(), scene_pos.y())
-                    self._bbox_rect.setRect(x1, y1, x2 - x1, y2 - y1)
-                    rect = self._bbox_rect.rect()
-                    self.scene().removeItem(self._bbox_rect)
-                    if rect.width() > 10 and rect.height() > 10:
-                        self.bbox_created.emit(
-                            rect.x(), rect.y(),
-                            rect.x() + rect.width(),
-                            rect.y() + rect.height()
-                        )
-                    self._bbox_start = None
-                    self._bbox_rect = None
+            if self.trigger_keyboard_place():
+                event.accept()
                 return
 
         if key in (Qt.Key_W, Qt.Key_Up):
@@ -306,11 +421,21 @@ class ZoomableGraphicsView(QGraphicsView):
                 self.scene_clicked.emit(scene_pos.x(), scene_pos.y())
                 return
             elif self.edit_mode == EditMode.BBOX:
-                self._bbox_start = scene_pos
-                self._bbox_rect = QGraphicsRectItem()
-                self._bbox_rect.setPen(QPen(QColor(0, 255, 0), 2, Qt.DashLine))
-                self._bbox_rect.setBrush(QBrush(QColor(0, 255, 0, 30)))
-                self.scene().addItem(self._bbox_rect)
+                self.cancel_drawing()
+                if self.scene() is not None:
+                    self._bbox_start = scene_pos
+                    self._bbox_rect = self._create_draft_rect(False)
+                    self.scene().addItem(self._bbox_rect)
+                return
+            elif self._is_split_mode():
+                if self._find_split_region_at(event.pos()) is not None:
+                    super().mousePressEvent(event)
+                    return
+                self.cancel_drawing()
+                if self.scene() is not None:
+                    self._bbox_start = scene_pos
+                    self._bbox_rect = self._create_draft_rect(True)
+                    self.scene().addItem(self._bbox_rect)
                 return
 
             item = self.itemAt(event.pos())
@@ -333,25 +458,41 @@ class ZoomableGraphicsView(QGraphicsView):
         scene_pos = self.mapToScene(event.pos())
 
         if self._dragging_point is not None:
-            self._dragging_point.setPos(scene_pos)
-            return
+            try:
+                self._dragging_point.setPos(scene_pos)
+            except RuntimeError:
+                self._dragging_point = None
+                self._drag_start_pos = None
+            else:
+                return
 
         if self._bbox_start is not None and self._bbox_rect is not None:
             x1 = min(self._bbox_start.x(), scene_pos.x())
             y1 = min(self._bbox_start.y(), scene_pos.y())
             x2 = max(self._bbox_start.x(), scene_pos.x())
             y2 = max(self._bbox_start.y(), scene_pos.y())
-            self._bbox_rect.setRect(x1, y1, x2 - x1, y2 - y1)
-            return
+            try:
+                self._bbox_rect.setRect(x1, y1, x2 - x1, y2 - y1)
+            except RuntimeError:
+                self._bbox_rect = None
+                self._bbox_start = None
+            else:
+                return
 
         super().mouseMoveEvent(event)
 
     def mouseReleaseEvent(self, event):
         if self._dragging_point is not None:
-            pos = self._dragging_point.pos()
+            try:
+                pos = self._dragging_point.pos()
+                wing_idx = self._dragging_point.wing_idx
+                point_idx = self._dragging_point.point_idx
+            except RuntimeError:
+                self._dragging_point = None
+                self._drag_start_pos = None
+                super().mouseReleaseEvent(event)
+                return
             start = self._drag_start_pos
-            wing_idx = self._dragging_point.wing_idx
-            point_idx = self._dragging_point.point_idx
             self._dragging_point = None
             self._drag_start_pos = None
             if start is None or abs(pos.x() - start.x()) > 0.01 or abs(pos.y() - start.y()) > 0.01:
@@ -359,16 +500,33 @@ class ZoomableGraphicsView(QGraphicsView):
             return
 
         if self._bbox_start is not None and self._bbox_rect is not None:
-            rect = self._bbox_rect.rect()
-            self.scene().removeItem(self._bbox_rect)
-            if rect.width() > 10 and rect.height() > 10:
-                self.bbox_created.emit(
-                    rect.x(), rect.y(),
-                    rect.x() + rect.width(),
-                    rect.y() + rect.height()
-                )
+            rect_item = self._bbox_rect
             self._bbox_start = None
             self._bbox_rect = None
+            rect = None
+            try:
+                rect = rect_item.rect()
+                scene = self.scene()
+                if scene is not None and rect_item.scene() == scene:
+                    scene.removeItem(rect_item)
+            except RuntimeError:
+                rect = None
+            if rect is not None:
+                is_split = self._is_split_mode()
+                min_size = 15 if is_split else 10
+                if rect.width() > min_size and rect.height() > min_size:
+                    if is_split:
+                        self.split_region_created.emit(
+                            rect.x(), rect.y(),
+                            rect.x() + rect.width(),
+                            rect.y() + rect.height()
+                        )
+                    else:
+                        self.bbox_created.emit(
+                            rect.x(), rect.y(),
+                            rect.x() + rect.width(),
+                            rect.y() + rect.height()
+                        )
             return
 
         super().mouseReleaseEvent(event)
@@ -516,16 +674,26 @@ class MiniMapWidget(QWidget):
         p.setPen(QPen(QColor(100, 100, 100), 1))
         p.drawRect(QRectF(x1, y1, x2 - x1, y2 - y1))
 
-        # Контуры крыльев (BBoxItem) на скане
+        # Контуры крыльев (BBoxItem) и областей семей (SplitRegionItem) на скане
         if self._parent_view is not None and self._parent_view.scene() is not None:
+            scene_items = self._parent_view.scene().items()
             p.setPen(QPen(QColor(76, 175, 80, 190), 1))
             p.setBrush(QBrush(QColor(76, 175, 80, 140)))
-            for item in self._parent_view.scene().items():
+            for item in scene_items:
                 if isinstance(item, BBoxItem):
                     br = item.mapRectToScene(item.rect())
                     bx1, by1 = self._scene_to_widget(br.x(), br.y())
                     bx2, by2 = self._scene_to_widget(br.x() + br.width(), br.y() + br.height())
                     p.drawRect(QRectF(bx1, by1, max(2.0, bx2 - bx1), max(2.0, by2 - by1)))
+
+            p.setPen(QPen(QColor(0, 160, 255, 220), 2))
+            p.setBrush(QBrush(QColor(0, 160, 255, 45)))
+            for item in scene_items:
+                if isinstance(item, SplitRegionItem) and item.isVisible():
+                    sr_item = item.mapRectToScene(item.rect())
+                    sx1, sy1 = self._scene_to_widget(sr_item.x(), sr_item.y())
+                    sx2, sy2 = self._scene_to_widget(sr_item.x() + sr_item.width(), sr_item.y() + sr_item.height())
+                    p.drawRect(QRectF(sx1, sy1, max(2.0, sx2 - sx1), max(2.0, sy2 - sy1)))
 
         # Прямоугольник видимой области (красный, ограниченный рамкой сцены)
         vr = self._view_rect.intersected(sr)

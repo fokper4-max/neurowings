@@ -19,9 +19,15 @@ from pathlib import Path
 from typing import List, Optional, Tuple, Union
 import numpy as np
 import cv2
+
+# Важно: загружаем torch (через core.models) строго ДО PyQt5 и core.constants (импортирует QColor)
+from ..core.models import TORCH_AVAILABLE, TORCH_IMPORT_ERROR
+if TORCH_AVAILABLE:
+    import torch
+
 from PyQt5.QtCore import QThread, pyqtSignal
 
-from ..core.image_io import read_rgb
+from ..core.image_io import image_size, read_rgb
 from ..core.constants import (
     YOLO_TO_WINGSDIG, YOLO_DET_IMAGE_SIZE, YOLO_DET_CONFIDENCE,
     YOLO_POSE_IMAGE_SIZE, YOLO_POSE_CONFIDENCE, BBOX_MARGIN,
@@ -30,7 +36,6 @@ from ..core.constants import (
     STAGE2_PORTABLE_ITERATIONS, STAGE2_PORTABLE_MAX_OFFSET
 )
 from ..core.data_models import Wing, WingPoint, BBox
-from ..core.models import TORCH_AVAILABLE, TORCH_IMPORT_ERROR
 from ..core.hardware_profiler import HardwareProfiler, ComputeProfile
 
 logger = logging.getLogger("NeuroWings")
@@ -38,9 +43,6 @@ logger = logging.getLogger("NeuroWings")
 # Ручная коррекция по Y для первых двух точек (смещение вверх в пикселях)
 KP_Y_CORRECTION = {0: -3.0, 1: -3.0}
 POSE_BATCH_SIZE = 16
-
-if TORCH_AVAILABLE:
-    import torch
 
 BEST_PIPELINE = ['portable', 'portable', 'mac', 'portable', 'mac', 'mac', 'mac', 'mac']
 
@@ -77,10 +79,17 @@ class ProcessingWorker(QThread):
         self._stop = False
 
     @staticmethod
-    def _run_pose_batch(model_pose, crops_list, imgsz: int = YOLO_POSE_IMAGE_SIZE, half: bool = False):
+    def _run_pose_batch(
+        model_pose,
+        crops_list,
+        imgsz: int = YOLO_POSE_IMAGE_SIZE,
+        half: bool = False,
+        device=None,
+    ):
         """Запустить model_pose батчем с безопасным fallback на одиночный вызов."""
         if not crops_list:
             return []
+        use_device = device is not None and str(device) != "cpu"
         try:
             kwargs = {
                 "imgsz": imgsz,
@@ -89,14 +98,43 @@ class ProcessingWorker(QThread):
             }
             if half:
                 kwargs["half"] = True
+            if use_device:
+                kwargs["device"] = str(device)
             res = model_pose(crops_list, **kwargs)
             if isinstance(res, (list, tuple)) and len(res) == len(crops_list):
                 return [[r] for r in res]
         except Exception:
-            pass
+            if use_device:
+                try:
+                    kwargs_no_dev = {
+                        "imgsz": imgsz,
+                        "conf": YOLO_POSE_CONFIDENCE,
+                        "verbose": False,
+                    }
+                    if half:
+                        kwargs_no_dev["half"] = True
+                    res = model_pose(crops_list, **kwargs_no_dev)
+                    if isinstance(res, (list, tuple)) and len(res) == len(crops_list):
+                        return [[r] for r in res]
+                except Exception:
+                    pass
 
         out = []
         for crop in crops_list:
+            if use_device:
+                try:
+                    out.append(
+                        model_pose(
+                            crop,
+                            imgsz=imgsz,
+                            conf=YOLO_POSE_CONFIDENCE,
+                            verbose=False,
+                            device=str(device),
+                        )
+                    )
+                    continue
+                except Exception:
+                    pass
             out.append(
                 model_pose(
                     crop,
@@ -106,6 +144,234 @@ class ProcessingWorker(QThread):
                 )
             )
         return out
+
+    @staticmethod
+    def _extract_det_boxes_with_conf(det_results) -> List[Tuple[float, float, float, float, float]]:
+        """Извлечь список (x1, y1, x2, y2, conf) из ответа model_det (совместимо с моками)."""
+        extracted: List[Tuple[float, float, float, float, float]] = []
+        if not det_results:
+            return extracted
+        for det in det_results:
+            boxes = getattr(det, "boxes", None)
+            if boxes is None:
+                continue
+            for box in boxes:
+                xyxy_raw = box.xyxy[0]
+                if hasattr(xyxy_raw, "cpu"):
+                    xyxy_vals = xyxy_raw.cpu().numpy()
+                else:
+                    xyxy_vals = np.asarray(xyxy_raw)
+                x1 = float(xyxy_vals[0])
+                y1 = float(xyxy_vals[1])
+                x2 = float(xyxy_vals[2])
+                y2 = float(xyxy_vals[3])
+
+                conf_val = 1.0
+                conf_raw = getattr(box, "conf", None)
+                if conf_raw is not None:
+                    try:
+                        c0 = conf_raw[0] if hasattr(conf_raw, "__getitem__") else conf_raw
+                        if hasattr(c0, "cpu"):
+                            c0 = c0.cpu().numpy()
+                        conf_val = float(np.asarray(c0).reshape(-1)[0])
+                    except Exception:
+                        conf_val = 1.0
+                extracted.append((x1, y1, x2, y2, conf_val))
+        return extracted
+
+    @staticmethod
+    def _run_det_single(model_det, img_bgr: np.ndarray, det_kwargs: dict):
+        """Одиночный вызов model_det с безопасным fallback на базовые аргументы."""
+        try:
+            return model_det(img_bgr, **det_kwargs)
+        except Exception:
+            return model_det(
+                img_bgr,
+                imgsz=YOLO_DET_IMAGE_SIZE,
+                conf=YOLO_DET_CONFIDENCE,
+                verbose=False,
+            )
+
+    @staticmethod
+    def _nms_boxes(
+        boxes: List[Tuple[float, float, float, float, float]],
+        iou_threshold: float = 0.45,
+        contain_threshold: float = 0.75,
+    ) -> List[Tuple[float, float, float, float, float]]:
+        """Class-agnostic NMS по IoU и подавление вложенных дублей (inter / min_area)."""
+        if len(boxes) <= 1:
+            return list(boxes)
+
+        ordered = sorted(boxes, key=lambda b: b[4], reverse=True)
+        kept: List[Tuple[float, float, float, float, float]] = []
+
+        for cand in ordered:
+            cx1, cy1, cx2, cy2, _cc = cand
+            c_area = max(0.0, cx2 - cx1) * max(0.0, cy2 - cy1)
+            if c_area <= 0.0:
+                continue
+
+            suppressed = False
+            for kx1, ky1, kx2, ky2, _kc in kept:
+                ix1 = max(cx1, kx1)
+                iy1 = max(cy1, ky1)
+                ix2 = min(cx2, kx2)
+                iy2 = min(cy2, ky2)
+                iw = max(0.0, ix2 - ix1)
+                ih = max(0.0, iy2 - iy1)
+                inter = iw * ih
+                if inter <= 0.0:
+                    continue
+
+                k_area = max(0.0, kx2 - kx1) * max(0.0, ky2 - ky1)
+                union = c_area + k_area - inter
+                iou = inter / union if union > 0.0 else 0.0
+                min_area = min(c_area, k_area)
+                contain = inter / min_area if min_area > 0.0 else 0.0
+                if iou > iou_threshold or contain > contain_threshold:
+                    suppressed = True
+                    break
+
+            if not suppressed:
+                kept.append(cand)
+
+        return kept
+
+    @classmethod
+    def _detect_wings_boxes(
+        cls,
+        model_det,
+        img: np.ndarray,
+        imgsz: int = YOLO_DET_IMAGE_SIZE,
+        conf: float = YOLO_DET_CONFIDENCE,
+        use_fp16: bool = False,
+        device=None,
+        max_det: int = 600,
+        should_stop=None,
+    ) -> List[Tuple[int, int, int, int]]:
+        """
+        Обнаружить рамки крыльев на BGR-изображении.
+        Для обычных кадров (max(w, h) < 3000 или соотношение сторон < 2.1) выполняет
+        одиночный проход model_det. Для сильно вытянутых сканов (например 4663x15057)
+        выполняет адаптивный тайлинг вдоль длинной стороны с перекрытием, отбрасыванием
+        усечённых боксов на внутренних швах и class-agnostic NMS.
+        """
+        if img is None or img.size == 0:
+            return []
+
+        h, w = img.shape[:2]
+        det_kwargs = {
+            "imgsz": imgsz,
+            "conf": conf,
+            "max_det": max_det,
+            "verbose": False,
+        }
+        if use_fp16:
+            det_kwargs["half"] = True
+        if device is not None and str(device) != "cpu":
+            det_kwargs["device"] = str(device)
+
+        long_side = max(w, h)
+        short_side = max(1, min(w, h))
+        aspect = long_side / float(short_side)
+
+        if long_side < 3000 or aspect < 2.1:
+            det_results = cls._run_det_single(model_det, img, det_kwargs)
+            return [
+                (int(x1), int(y1), int(x2), int(y2))
+                for x1, y1, x2, y2, _c in cls._extract_det_boxes_with_conf(det_results)
+            ]
+
+        tile_len = max(1, int(round(short_side * 1.35)))
+        overlap = int(round(short_side * 0.35))
+        stride = max(1, tile_len - overlap)
+
+        spans: List[Tuple[int, int]] = []
+        pos = 0
+        while pos < long_side:
+            end = pos + tile_len
+            if end >= long_side:
+                start = max(0, long_side - tile_len)
+                if not spans or start > spans[-1][0]:
+                    spans.append((start, long_side))
+                break
+            spans.append((pos, end))
+            pos += stride
+
+        # Подбираем масштаб тайлов с учётом обученного окна yolo_detect_best.pt (train imgsz=896):
+        # на тайле 1:1.35 при imgsz=1280 крыло раздувается >90 px и выпадает из окна детектора,
+        # а связка тайлов (imgsz<=640) + глобальный контекстный проход (imgsz<=960) перекрывает
+        # весь диапазон масштабов крыльев (20-60 px в пространстве сети) и стыки тайлов.
+        tile_det_kwargs = dict(det_kwargs)
+        tile_det_kwargs["imgsz"] = max(320, min(int(imgsz), 640))
+        full_det_kwargs = dict(det_kwargs)
+        full_det_kwargs["imgsz"] = max(320, min(int(imgsz), 960))
+
+        try:
+            raw_global_boxes: List[Tuple[float, float, float, float, float]] = []
+            border_margin = 12.0
+            is_vertical = h >= w
+
+            for start, end in spans:
+                if should_stop is not None and should_stop():
+                    return []
+
+                if is_vertical:
+                    tile = img[start:end, :]
+                    th = end - start
+                    tile_res = cls._run_det_single(model_det, tile, tile_det_kwargs)
+                    for lx1, ly1, lx2, ly2, c_val in cls._extract_det_boxes_with_conf(tile_res):
+                        if start > 0 and ly1 <= border_margin:
+                            continue
+                        if end < h and ly2 >= (th - border_margin):
+                            continue
+                        gx1 = max(0.0, min(float(w), lx1))
+                        gy1 = max(0.0, min(float(h), ly1 + start))
+                        gx2 = max(0.0, min(float(w), lx2))
+                        gy2 = max(0.0, min(float(h), ly2 + start))
+                        if gx2 > gx1 and gy2 > gy1:
+                            raw_global_boxes.append((gx1, gy1, gx2, gy2, c_val))
+                else:
+                    tile = np.ascontiguousarray(img[:, start:end])
+                    tw = end - start
+                    tile_res = cls._run_det_single(model_det, tile, tile_det_kwargs)
+                    for lx1, ly1, lx2, ly2, c_val in cls._extract_det_boxes_with_conf(tile_res):
+                        if start > 0 and lx1 <= border_margin:
+                            continue
+                        if end < w and lx2 >= (tw - border_margin):
+                            continue
+                        gx1 = max(0.0, min(float(w), lx1 + start))
+                        gy1 = max(0.0, min(float(h), ly1))
+                        gx2 = max(0.0, min(float(w), lx2 + start))
+                        gy2 = max(0.0, min(float(h), ly2))
+                        if gx2 > gx1 and gy2 > gy1:
+                            raw_global_boxes.append((gx1, gy1, gx2, gy2, c_val))
+
+            if should_stop is not None and should_stop():
+                return []
+
+            # Глобальный контекстный проход (imgsz<=960) страхует стыки тайлов и крупные крылья
+            try:
+                full_res = cls._run_det_single(model_det, img, full_det_kwargs)
+                for fx1, fy1, fx2, fy2, fc in cls._extract_det_boxes_with_conf(full_res):
+                    gx1 = max(0.0, min(float(w), fx1))
+                    gy1 = max(0.0, min(float(h), fy1))
+                    gx2 = max(0.0, min(float(w), fx2))
+                    gy2 = max(0.0, min(float(h), fy2))
+                    if gx2 > gx1 and gy2 > gy1:
+                        raw_global_boxes.append((gx1, gy1, gx2, gy2, fc))
+            except Exception as full_exc:
+                logger.debug("Контекстный проход детектора пропущен: %s", full_exc)
+
+            merged = cls._nms_boxes(raw_global_boxes, iou_threshold=0.45, contain_threshold=0.75)
+            return [(int(x1), int(y1), int(x2), int(y2)) for x1, y1, x2, y2, _c in merged]
+        except Exception as exc:
+            logger.warning("Ошибка тайлинга детектора, откат на одиночный проход: %s", exc)
+            det_results = cls._run_det_single(model_det, img, det_kwargs)
+            return [
+                (int(x1), int(y1), int(x2), int(y2))
+                for x1, y1, x2, y2, _c in cls._extract_det_boxes_with_conf(det_results)
+            ]
 
     @staticmethod
     def _subpixel_vein_snap(
@@ -229,7 +495,8 @@ class ProcessingWorker(QThread):
             if ctx is not None:
                 ctx.__enter__()
             try:
-                pose_batches = cls._run_pose_batch(model_pose, crops_bgr)
+                pose_device = str(device) if (device is not None and str(device) != "cpu") else None
+                pose_batches = cls._run_pose_batch(model_pose, crops_bgr, device=pose_device)
             finally:
                 if ctx is not None:
                     ctx.__exit__(None, None, None)
@@ -271,7 +538,7 @@ class ProcessingWorker(QThread):
                 points=[WingPoint(x=pt[0], y=pt[1]) for pt in snapped_pts],
                 bbox=BBox(x1, y1, x2, y2),
                 points_yolo=[WingPoint(x=pt[0], y=pt[1]) for pt in snapped_yolo],
-                point_sources=['yolo'] * 8,
+                point_sources=['bbox'] * 8,
             )
             wing.analyze(image_height=h, image_width=w)
             return wing
@@ -289,6 +556,8 @@ class ProcessingWorker(QThread):
         try:
             profile = self.compute_profile or HardwareProfiler.get_active_profile()
             batch_size = max(1, int(getattr(profile, "pose_batch_size", POSE_BATCH_SIZE)))
+            if str(self.device) == "mps" or str(self.device).startswith("mps:"):
+                batch_size = min(batch_size, 8)
             use_tta = bool(getattr(profile, "use_tta", False))
             tta_scales = tuple(getattr(profile, "tta_scales", (1.0,))) if use_tta else (1.0,)
             use_fp16 = bool(getattr(profile, "use_fp16", False)) and (str(self.device).startswith("cuda"))
@@ -300,14 +569,27 @@ class ProcessingWorker(QThread):
             file_errors = []
             total = len(self.image_paths)
 
-            # Параллельный предзагрузчик следующего скана с диска во время работы GPU/CPU
+            # Параллельный предзагрузчик следующего скана с диска во время работы GPU/CPU.
+            # Ограничиваем предзагрузку по площади кадра (<= 60 МП), чтобы сверхбольшие сканы
+            # (например, 432 МП) не загружались одновременно по 5 штук в ОЗУ.
+            def _can_prefetch(p: Path) -> bool:
+                try:
+                    w_img, h_img = image_size(p)
+                    return (w_img * h_img) <= 60_000_000
+                except Exception:
+                    return False
+
             prefetch_pool = None
             prefetch_futures = {}
+            prefetch_checked = set()
             if total > 1 and getattr(profile, "io_workers", 1) > 1 and not getattr(profile, "aggressive_gc", False):
                 workers = min(4, int(profile.io_workers), total)
                 prefetch_pool = ThreadPoolExecutor(max_workers=workers)
                 for p in self.image_paths[: workers + 1]:
-                    prefetch_futures[p] = prefetch_pool.submit(read_rgb, p)
+                    if p not in prefetch_checked:
+                        prefetch_checked.add(p)
+                        if _can_prefetch(p):
+                            prefetch_futures[p] = prefetch_pool.submit(read_rgb, p)
 
             try:
                 with torch.inference_mode():
@@ -320,8 +602,10 @@ class ProcessingWorker(QThread):
                             lookahead_idx = i + 2
                             if lookahead_idx < total:
                                 next_p = self.image_paths[lookahead_idx]
-                                if next_p not in prefetch_futures:
-                                    prefetch_futures[next_p] = prefetch_pool.submit(read_rgb, next_p)
+                                if next_p not in prefetch_futures and next_p not in prefetch_checked:
+                                    prefetch_checked.add(next_p)
+                                    if _can_prefetch(next_p):
+                                        prefetch_futures[next_p] = prefetch_pool.submit(read_rgb, next_p)
 
                         try:
                             mode_badge = " [TTA]" if len(tta_scales) > 1 else ""
@@ -343,37 +627,26 @@ class ProcessingWorker(QThread):
                             )
 
                             wings = []
-                            try:
-                                det_kwargs = {
-                                    "imgsz": effective_det_imgsz,
-                                    "conf": det_conf,
-                                    "verbose": False,
-                                }
-                                if use_fp16:
-                                    det_kwargs["half"] = True
-                                det_results = self.model_det(img, **det_kwargs)
-                            except Exception:
-                                det_results = self.model_det(
-                                    img,
-                                    imgsz=YOLO_DET_IMAGE_SIZE,
-                                    conf=YOLO_DET_CONFIDENCE,
-                                    verbose=False,
-                                )
+                            raw_boxes = self._detect_wings_boxes(
+                                self.model_det,
+                                img,
+                                imgsz=effective_det_imgsz,
+                                conf=det_conf,
+                                use_fp16=use_fp16,
+                                device=self.device,
+                                max_det=600,
+                                should_stop=lambda: self._stop,
+                            )
 
                             # Собираем боксы крыльев
                             detected_boxes = []
-                            for det in det_results:
-                                if det.boxes is None:
+                            for x1, y1, x2, y2 in raw_boxes:
+                                x1m, y1m = max(0, x1 - BBOX_MARGIN), max(0, y1 - BBOX_MARGIN)
+                                x2m, y2m = min(w, x2 + BBOX_MARGIN), min(h, y2 + BBOX_MARGIN)
+                                base_crop = img[y1m:y2m, x1m:x2m]
+                                if base_crop.size == 0:
                                     continue
-                                for box in det.boxes:
-                                    x1, y1, x2, y2 = box.xyxy[0].cpu().numpy()
-                                    x1, y1, x2, y2 = int(x1), int(y1), int(x2), int(y2)
-                                    x1m, y1m = max(0, x1 - BBOX_MARGIN), max(0, y1 - BBOX_MARGIN)
-                                    x2m, y2m = min(w, x2 + BBOX_MARGIN), min(h, y2 + BBOX_MARGIN)
-                                    base_crop = img[y1m:y2m, x1m:x2m]
-                                    if base_crop.size == 0:
-                                        continue
-                                    detected_boxes.append((x1, y1, x2, y2, x1m, y1m, x2m, y2m, base_crop))
+                                detected_boxes.append((x1, y1, x2, y2, x1m, y1m, x2m, y2m, base_crop))
 
                             # Формируем общий список кропов (с учётом TTA-масштабов, если включён ансамбль)
                             # Каждый элемент flat_tasks: (box_idx, scale_idx, x1m_s, y1m_s, crop_s)
@@ -399,7 +672,11 @@ class ProcessingWorker(QThread):
                                 batch_slice = flat_tasks[batch_start : batch_start + batch_size]
                                 batch_crops = [t[4] for t in batch_slice]
                                 pose_batches = self._run_pose_batch(
-                                    self.model_pose, batch_crops, imgsz=pose_imgsz, half=use_fp16
+                                    self.model_pose,
+                                    batch_crops,
+                                    imgsz=pose_imgsz,
+                                    half=use_fp16,
+                                    device=self.device,
                                 )
                                 for (b_idx, s_idx, sx1, sy1, scrop), pose_res in zip(batch_slice, pose_batches):
                                     box_predictions[b_idx].append((s_idx, sx1, sy1, scrop, pose_res))
@@ -670,7 +947,7 @@ class ProcessingWorker(QThread):
         pts: List[Tuple[float, float]]
     ) -> List[Tuple[float, float]]:
         """
-        Масштабно- и поворотно-инвариантная геометрическая доводка точек 1–8
+        Масштабно- и поворотно-инвариантная геометрическая доводка точек 1-8
         на пересечение осевых линий жилок согласно Инструкции В.А. Карташева (Рис. 15, стр. 13).
 
         В острых Y-образных развилках (точки 3 и 4) и Т-образных сочленениях (точки 5, 6, 7, 8)

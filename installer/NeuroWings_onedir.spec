@@ -118,8 +118,6 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=[str(base_dir / 'installer' / 'runtime_hook_torch_dll.py')],
     excludes=[
-        'PIL.AvifImagePlugin',
-        'PIL._avif',
         'scipy',
         'pandas',
         # Keep packaging aligned with the onefile build. NeuroWings does not

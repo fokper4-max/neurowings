@@ -7,7 +7,7 @@
 """
 
 __all__ = [
-    'PointItem', 'WingLabelItem', 'BBoxItem', 'MeasurementLineItem',
+    'PointItem', 'WingLabelItem', 'BBoxItem', 'MeasurementLineItem', 'SplitRegionItem',
     'ZoomableGraphicsView', 'AnalysisWidget', 'GraphsWidget',
     'InterpretationWidget', 'GlobalInterpretationWidget',
     'BatchResultsWidget', 'PointSettingsDialog',
@@ -16,13 +16,16 @@ __all__ = [
 
 
 def __getattr__(name):
-    if name in {'PointItem', 'WingLabelItem', 'BBoxItem', 'MeasurementLineItem'}:
-        from .graphics_items import PointItem, WingLabelItem, BBoxItem, MeasurementLineItem
+    if name in {'PointItem', 'WingLabelItem', 'BBoxItem', 'MeasurementLineItem', 'SplitRegionItem'}:
+        from .graphics_items import (
+            PointItem, WingLabelItem, BBoxItem, MeasurementLineItem, SplitRegionItem
+        )
         return {
             'PointItem': PointItem,
             'WingLabelItem': WingLabelItem,
             'BBoxItem': BBoxItem,
             'MeasurementLineItem': MeasurementLineItem,
+            'SplitRegionItem': SplitRegionItem,
         }[name]
     if name == 'ZoomableGraphicsView':
         from .graphics_view import ZoomableGraphicsView

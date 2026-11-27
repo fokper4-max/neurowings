@@ -599,26 +599,26 @@ class Regression(unittest.TestCase):
   sample_sha = "a077e85583a22be9fb8348fb8c635bd22d2deff705fd355fa35fa675fa0b7db8"
   gh_payload = {
    "url": "https://api.github.com/repos/fokper4-max/neurowings/releases/999",
-   "html_url": "https://github.com/fokper4-max/neurowings/releases/tag/v2.3.0",
-   "tag_name": "v2.3.0",
-   "name": "НейроКрылья v2.3.0 — Автообновление с GitHub",
+   "html_url": "https://github.com/fokper4-max/neurowings/releases/tag/v2.4.0",
+   "tag_name": "v2.4.0",
+   "name": "НейроКрылья v2.4.0 - Автообновление с GitHub",
    "published_at": "2026-11-05T18:30:00Z",
-   "body": "### Что нового в v2.3.0\n- **Автообновление** с GitHub Releases\n- Вкладка «🔄 Обновление» в главном окне\n",
+   "body": "### Что нового в v2.4.0\n- **Автообновление** с GitHub Releases\n- Вкладка «🔄 Обновление» в главном окне\n",
    "assets": [
     {
-     "name": "NeuroWings-2.3.0.exe",
+     "name": "NeuroWings-2.4.0.exe",
      "size": 150000000,
-     "browser_download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.3.0/NeuroWings-2.3.0.exe",
+     "browser_download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.4.0/NeuroWings-2.4.0.exe",
      "digest": f"sha256:{sample_sha}",
     }
    ],
   }
   info = normalize_update_info(gh_payload, "https://api.github.com/repos/fokper4-max/neurowings/releases/latest")
-  self.assertEqual(info["version"], "2.3.0")
-  self.assertTrue(is_newer_version(info["version"], "2.2.0"))
+  self.assertEqual(info["version"], "2.4.0")
+  self.assertTrue(is_newer_version(info["version"], "2.3.0"))
   self.assertEqual(
    info["download_url"],
-   "https://github.com/fokper4-max/neurowings/releases/download/v2.3.0/NeuroWings-2.3.0.exe",
+   "https://github.com/fokper4-max/neurowings/releases/download/v2.4.0/NeuroWings-2.4.0.exe",
   )
   self.assertEqual(info["sha256"], sample_sha)
   self.assertEqual(info["published_at"], "2026-11-05")
@@ -627,23 +627,23 @@ class Regression(unittest.TestCase):
 
   # 2. Извлечение SHA256 из текста body релиза, если поле digest отсутствует
   gh_payload_body_sha = {
-   "tag_name": "v2.3.1",
+   "tag_name": "v2.4.1",
    "body": f"- Исправления ошибок\nSHA256: `{sample_sha.upper()}`",
    "assets": [
     {
-     "name": "NeuroWings-2.3.1.exe",
-     "browser_download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.3.1/NeuroWings-2.3.1.exe",
+     "name": "NeuroWings-2.4.1.exe",
+     "browser_download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.4.1/NeuroWings-2.4.1.exe",
     }
    ],
   }
   info_body_sha = normalize_update_info(gh_payload_body_sha)
-  self.assertEqual(info_body_sha["version"], "2.3.1")
+  self.assertEqual(info_body_sha["version"], "2.4.1")
   self.assertEqual(info_body_sha["sha256"], sample_sha)
 
   # 3. fetch_update_feed пробует GitHub API и при ошибке переключается на резервный update-feed.json
   fallback_payload = {
-   "version": "2.2.5",
-   "url": "https://193-124-117-175.nip.io/downloads/neurowings/NeuroWings-2.2.5.exe",
+   "version": "2.3.5",
+   "url": "https://193-124-117-175.nip.io/downloads/neurowings/NeuroWings-2.3.5.exe",
    "sha256": sample_sha,
    "notes": ["Резервный канал обновлений"],
   }
@@ -661,7 +661,7 @@ class Regression(unittest.TestCase):
 
   with patch("neurowings.core.update_manager.urlopen", side_effect=fake_urlopen):
    fb_info = fetch_update_feed("")
-  self.assertEqual(fb_info["version"], "2.2.5")
+  self.assertEqual(fb_info["version"], "2.3.5")
   self.assertGreaterEqual(len(call_urls), 2)
   self.assertIn("api.github.com", call_urls[0])
 
@@ -680,7 +680,7 @@ class Regression(unittest.TestCase):
    dest1 = Path(t) / "NeuroWings-sha.exe"
    with patch("neurowings.core.update_manager.urlopen", side_effect=fake_dl_open):
     out1 = download_update(
-     {"download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.3.0/NW.exe", "sha256": fake_sha},
+     {"download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.4.0/NW.exe", "sha256": fake_sha},
      dest1,
     )
    self.assertTrue(out1.exists())
@@ -690,12 +690,12 @@ class Regression(unittest.TestCase):
    dest2 = Path(t) / "NeuroWings-nosha.exe"
    with patch("neurowings.core.update_manager.urlopen", side_effect=fake_dl_open):
     out2 = download_update(
-     {"download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.3.0/NW.exe", "sha256": ""},
+     {"download_url": "https://github.com/fokper4-max/neurowings/releases/download/v2.4.0/NW.exe", "sha256": ""},
      dest2,
     )
    self.assertTrue(out2.exists())
 
-   # А со стороннего домена без SHA256 — блокируется
+   # А со стороннего домена без SHA256 - блокируется
    with self.assertRaises(UpdateError):
     download_update(
      {"download_url": "https://example.com/NW.exe", "sha256": ""},
@@ -729,7 +729,7 @@ class Regression(unittest.TestCase):
   self.assertEqual(win.tab_widget.tabText(tab_idx), "🔄 Обновление")
   self.assertFalse(win.btn_install_update.isEnabled())
 
-  # Симулируем приход новой версии v2.3.0 и ответ «Нет» во всплывающем окне (пользователь решил обновиться позже)
+  # Симулируем приход новой версии v2.4.0 и ответ «Нет» во всплывающем окне (пользователь решил обновиться позже)
   info_new = dict(info)
   info_new["update_available"] = True
   with patch.object(QMessageBox, "question", return_value=QMessageBox.No) as mock_q:
@@ -739,7 +739,7 @@ class Regression(unittest.TestCase):
   # Вкладка обновилась, получила индикатор 🔴, кнопка скачивания стала активной!
   self.assertEqual(win.tab_widget.tabText(tab_idx), "🔄 Обновление 🔴")
   self.assertTrue(win.btn_install_update.isEnabled())
-  self.assertIn("2.3.0", win.lbl_update_latest_ver.text())
+  self.assertIn("2.4.0", win.lbl_update_latest_ver.text())
   self.assertIn("Автообновление с GitHub Releases", win.txt_update_notes.toPlainText())
 
   # Проверка прогресс-бара на вкладке «🔄 Обновление»
@@ -750,7 +750,7 @@ class Regression(unittest.TestCase):
 
   # Симулируем проверку, когда установлена актуальная версия
   info_same = dict(info)
-  info_same["version"] = "2.2.0"
+  info_same["version"] = "2.3.0"
   info_same["update_available"] = False
   win._on_update_check_finished(info_same, manual=False)
   self.assertEqual(win.tab_widget.tabText(tab_idx), "🔄 Обновление")
@@ -864,6 +864,506 @@ class Regression(unittest.TestCase):
    ps1_text = ps1.read_text(encoding="utf-8-sig")
    self.assertIn("for ($attempt = 1; $attempt -le 40; $attempt++)", ps1_text)
    self.assertIn("Start-Sleep -Milliseconds 1200", ps1_text)
+
+ def test_remove_files_and_empty_state_in_left_panel(self):
+  """Удаление файлов из левого списка, пустое состояние, повторная загрузка и режим одиночного крыла."""
+  from unittest.mock import patch
+  from PIL import Image
+  from PyQt5.QtCore import Qt
+  from PyQt5.QtWidgets import QMessageBox
+  from neurowings.ui.main_window import MainWindow
+
+  pts1 = [
+   (20.0, 60.0), (80.0, 55.0), (45.0, 54.0), (30.0, 56.0),
+   (44.0, 40.0), (52.0, 35.0), (58.0, 36.0), (42.0, 22.0),
+  ]
+  pts2 = [
+   (25.0, 62.0), (85.0, 58.0), (50.0, 56.0), (34.0, 58.0),
+   (48.0, 42.0), (57.0, 36.0), (63.0, 37.0), (46.0, 23.0),
+  ]
+
+  with tempfile.TemporaryDirectory() as t:
+   p1 = Path(t) / "a_file1.jpg"
+   p2 = Path(t) / "b_file2.jpg"
+   p3 = Path(t) / "c_file3.jpg"
+   for p, col in ((p1, (240, 240, 240)), (p2, (235, 235, 240)), (p3, (240, 235, 235))):
+    Image.new("RGB", (120, 90), color=col).save(p)
+
+   with patch.object(MainWindow, "_load_models"), patch.object(MainWindow, "_load_gpt_config"):
+    win = MainWindow()
+   try:
+    win._load_file_paths([p1, p2, p3])
+    self.assertTrue(hasattr(win, "btn_remove_file"))
+    self.assertTrue(win.left_panel.isAncestorOf(win.btn_remove_file))
+    self.assertEqual(win.file_list.count(), 3)
+    self.assertEqual(Path(win.current_image.path), p1)
+
+    # Ставим 1 крыло в 1-й файл и делаем правку (запись в _undo_stack)
+    w1 = Wing(points=[WingPoint(x, y, True) for x, y in pts1], point_sources=["manual"] * 8)
+    win.current_image.wings = [w1]
+    win.current_image.analyze_all_wings()
+    win._remember_edit()
+    win.current_image.is_modified = True
+    win._update_display()
+    self.assertTrue(any(str(p) == str(p1) for p, _ in win._undo_stack))
+
+    # Удаляем текущий файл из списка (файл на диске остается нетронутым)
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.Discard) as mock_q:
+     win._remove_current_file()
+     self.assertTrue(mock_q.called)
+
+    self.assertEqual(win.file_list.count(), 2)
+    self.assertEqual(len(win.images), 2)
+    self.assertIn("1)", win.file_list.item(0).text())
+    self.assertIn(p2.name, win.file_list.item(0).text())
+    self.assertIn("2)", win.file_list.item(1).text())
+    self.assertIn(p3.name, win.file_list.item(1).text())
+    self.assertIsNotNone(win.current_image)
+    self.assertEqual(Path(win.current_image.path), p2)
+    self.assertFalse(any(str(p) == str(p1) for p, _ in win._undo_stack))
+    self.assertTrue(p1.exists())
+
+    # Отмечаем оставшиеся 2 файла галочками и убираем через _remove_files_action
+    for row in range(win.file_list.count()):
+     win.file_list.item(row).setCheckState(Qt.Checked)
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes) as mock_q:
+     win._remove_files_action()
+     self.assertTrue(mock_q.called)
+
+    self.assertEqual(win.file_list.count(), 0)
+    self.assertIsNone(win.current_image)
+    self.assertEqual(len(win.images), 0)
+    self.assertEqual(win.lbl_wings_count.text(), "Крыльев: 0")
+    self.assertTrue(p2.exists())
+    self.assertTrue(p3.exists())
+
+    # Загружаем файл снова в то же окно - отображение и _update_display работают без RuntimeError
+    win._load_file_paths([p1])
+    self.assertEqual(win.file_list.count(), 1)
+    self.assertEqual(Path(win.current_image.path), p1)
+    win._update_display()
+
+    # Удаление не-текущего файла в режиме single_wing_mode = True (пересчет сводной статистики)
+    win._load_file_paths([p1, p2])
+    win.images[str(p1)].wings = [
+     Wing(points=[WingPoint(x, y, True) for x, y in pts1], point_sources=["manual"] * 8)
+    ]
+    win.images[str(p2)].wings = [
+     Wing(points=[WingPoint(x, y, True) for x, y in pts2], point_sources=["manual"] * 8)
+    ]
+    win.images[str(p1)].analyze_all_wings()
+    win.images[str(p2)].analyze_all_wings()
+    win._toggle_single_wing_mode(True)
+    self.assertTrue(win.single_wing_mode)
+    self.assertIsNotNone(win.analysis_widget.last_result)
+    self.assertEqual(win.analysis_widget.last_result.total, 2)
+    self.assertEqual(win.analysis_widget.analysis_table.item(0, 2).text(), "2")
+    self.assertEqual(Path(win.current_image.path), p1)
+
+    win.file_list.item(1).setCheckState(Qt.Checked)
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes):
+     win._remove_files_action()
+
+    self.assertEqual(win.file_list.count(), 1)
+    self.assertEqual(Path(win.current_image.path), p1)
+    self.assertIsNotNone(win.analysis_widget.last_result)
+    self.assertEqual(win.analysis_widget.last_result.total, 1)
+    self.assertEqual(win.analysis_widget.analysis_table.item(0, 2).text(), "1")
+    self.assertTrue(p2.exists())
+   finally:
+    win.close()
+
+ def test_delete_last_wing_persists_empty_tps_and_updates_left_list(self):
+  """Удаление последнего крыла перезаписывает пустой .tps и обновляет маркер и статистику слева."""
+  from unittest.mock import patch
+  from PIL import Image
+  from PyQt5.QtWidgets import QMessageBox
+  from neurowings.ui.main_window import MainWindow
+
+  pts = [
+   (116.0, 283.0), (181.0, 278.0), (143.0, 278.0), (124.0, 279.0),
+   (142.0, 266.0), (150.0, 262.0), (155.0, 262.0), (140.0, 249.0),
+  ]
+
+  with tempfile.TemporaryDirectory() as t:
+   img_p = Path(t) / "single.jpg"
+   tps_p = img_p.with_suffix(".tps")
+   Image.new("RGB", (300, 400), color=(240, 240, 240)).save(img_p)
+
+   init_data = ImageData(
+    img_p,
+    wings=[Wing(points=[WingPoint(x, y) for x, y in pts])],
+    width=300,
+    height=400,
+   )
+   save_tps_from_image(init_data, tps_p)
+   self.assertIn("LM=8", tps_p.read_text(encoding="cp1251"))
+
+   with patch.object(MainWindow, "_load_models"), patch.object(MainWindow, "_load_gpt_config"):
+    win = MainWindow()
+   try:
+    win._load_file_paths([img_p])
+    self.assertEqual(len(win.current_image.wings), 1)
+    self.assertTrue(win.file_list.item(0).text().startswith("✓"))
+    self.assertEqual(win.lbl_files_stats.text(), "Готово: 1 из 1")
+
+    win.wings_table.setCurrentCell(-1, -1)
+    win.selected_wing_idx = 0
+    with patch.object(QMessageBox, "question", return_value=QMessageBox.Yes) as mock_q:
+     win._delete_selected_wing()
+     self.assertTrue(mock_q.called)
+
+    self.assertEqual(len(win.current_image.wings), 0)
+    self.assertFalse(win.current_image.is_modified)
+
+    reloaded = ImageData(img_p, width=300, height=400)
+    load_tps_into_image(reloaded, tps_p)
+    self.assertEqual(len(reloaded.wings), 0)
+
+    self.assertTrue(win.file_list.item(0).text().startswith("○"))
+    self.assertEqual(win.lbl_files_stats.text(), "Готово: 0 из 1")
+   finally:
+    win.close()
+
+ def test_rotate_ccw90_and_roundtrip_coordinates(self):
+  """Поворот 90 влево и обратный поворот 90 вправо сохраняют размер, пиксельный маркер, точки и bbox 1:1."""
+  from unittest.mock import patch
+  from PIL import Image
+  from neurowings.ui.main_window import MainWindow
+
+  orig_pts = [
+   (40.0, 95.0), (190.0, 88.0), (110.0, 86.0), (70.0, 89.0),
+   (108.0, 62.0), (125.0, 52.0), (138.0, 54.0), (105.0, 28.0),
+  ]
+  orig_bbox = BBox(30.0, 20.0, 200.0, 105.0)
+
+  with tempfile.TemporaryDirectory() as t:
+   img_p = Path(t) / "rect_marker.png"
+   im = Image.new("RGB", (240, 120), color=(240, 240, 240))
+   for y in range(20):
+    for x in range(20):
+     im.putpixel((x, y), (255, 0, 0))
+   im.save(img_p)
+
+   with patch.object(MainWindow, "_load_models"), patch.object(MainWindow, "_load_gpt_config"):
+    win = MainWindow()
+   try:
+    win._load_file_paths([img_p])
+    win.current_image.wings = [
+     Wing(
+      points=[WingPoint(x, y, True) for x, y in orig_pts],
+      bbox=BBox(orig_bbox.x1, orig_bbox.y1, orig_bbox.x2, orig_bbox.y2),
+      point_sources=["manual"] * 8,
+     )
+    ]
+
+    # Поворот 90 влево (ccw90): (240, 120) -> (120, 240), (x, y) -> (y, 240 - x)
+    win._rotate_current_image_ccw()
+    self.assertEqual((win.current_image.width, win.current_image.height), (120, 240))
+    self.assertEqual(image_size(img_p), (120, 240))
+
+    with Image.open(img_p) as rot_im:
+     self.assertEqual(rot_im.getpixel((5, 234)), (255, 0, 0))
+     self.assertEqual(rot_im.getpixel((5, 5)), (240, 240, 240))
+
+    w_ccw = win.current_image.wings[0]
+    for (ox, oy), pt in zip(orig_pts, w_ccw.points):
+     self.assertAlmostEqual(pt.x, oy, places=6)
+     self.assertAlmostEqual(pt.y, 240.0 - ox, places=6)
+    self.assertAlmostEqual(w_ccw.bbox.x1, orig_bbox.y1, places=6)
+    self.assertAlmostEqual(w_ccw.bbox.y1, 240.0 - orig_bbox.x2, places=6)
+    self.assertAlmostEqual(w_ccw.bbox.x2, orig_bbox.y2, places=6)
+    self.assertAlmostEqual(w_ccw.bbox.y2, 240.0 - orig_bbox.x1, places=6)
+
+    # Обратный поворот 90 вправо (cw90): возврат 1:1 к (240, 120) и исходным координатам
+    win._rotate_current_image_cw()
+    self.assertEqual((win.current_image.width, win.current_image.height), (240, 120))
+    self.assertEqual(image_size(img_p), (240, 120))
+
+    with Image.open(img_p) as back_im:
+     self.assertEqual(back_im.getpixel((5, 5)), (255, 0, 0))
+
+    w_back = win.current_image.wings[0]
+    for (ox, oy), pt in zip(orig_pts, w_back.points):
+     self.assertAlmostEqual(pt.x, ox, places=6)
+     self.assertAlmostEqual(pt.y, oy, places=6)
+    self.assertAlmostEqual(w_back.bbox.x1, orig_bbox.x1, places=6)
+    self.assertAlmostEqual(w_back.bbox.y1, orig_bbox.y1, places=6)
+    self.assertAlmostEqual(w_back.bbox.x2, orig_bbox.x2, places=6)
+    self.assertAlmostEqual(w_back.bbox.y2, orig_bbox.y2, places=6)
+   finally:
+    win.close()
+
+ def test_image_split_auto_detect_and_crop_with_rotation_and_wings(self):
+  """Авто-поиск 5 семей с синими этикетками, санитайзер имен и нарезка с поворотом ccw90, DPI и переносом крыльев."""
+  import numpy as np
+  from PIL import Image
+  from neurowings.core.image_split import (
+   detect_family_regions,
+   sanitize_region_name,
+   split_image_regions,
+  )
+
+  with tempfile.TemporaryDirectory() as t:
+   scan_path = Path(t) / "multi_colony.jpg"
+   arr = np.full((2200, 1200, 3), 255, dtype=np.uint8)
+
+   y_starts = [70, 500, 930, 1360, 1790]
+   for y0 in y_starts:
+    # Синяя этикетка слева
+    arr[y0 + 25 : y0 + 285, 35:195] = (110, 165, 248)
+    # 2 ряда по 8 вертикальных крыльев (темное узкое основание сверху, широкая желто-коричневая вершина снизу)
+    for row_y in (y0 + 15, y0 + 165):
+     for col_idx in range(8):
+      cx = 285 + col_idx * 110
+      arr[row_y : row_y + 38, cx - 7 : cx + 7] = (85, 65, 40)
+      arr[row_y + 38 : row_y + 125, cx - 20 : cx + 20] = (195, 155, 85)
+
+   # 2 мелких артефакта в межсемейных зазорах
+   arr[435:445, 580:590] = (140, 120, 100)
+   arr[1295:1305, 720:730] = (140, 120, 100)
+
+   Image.fromarray(arr, mode="RGB").save(scan_path, format="JPEG", quality=95, dpi=(1200, 1200))
+
+   info = detect_family_regions(scan_path)
+   regions = info["regions"]
+   self.assertEqual(len(regions), 5)
+   self.assertEqual(info["axis"], "horizontal")
+   self.assertEqual(info["suggested_rotation"], "ccw90")
+   for reg in regions:
+    self.assertLessEqual(reg.x1, 50.0)
+    self.assertGreaterEqual(reg.x2, 1150.0)
+
+   # Проверка sanitize_region_name
+   self.assertEqual(sanitize_region_name("№Б / тест: *?"), "№Б_тест")
+   self.assertEqual(sanitize_region_name("CON"), "CON_1")
+   self.assertEqual(sanitize_region_name("CON.txt"), "CON_1.txt")
+   self.assertEqual(sanitize_region_name(""), "Семья")
+
+   # Крыло внутри 1-й семьи для проверки переноса и пересчета координат в ccw90
+   rx1, ry1, rx2, ry2 = regions[0].normalized(1200, 2200)
+   cw, ch = rx2 - rx1, ry2 - ry1
+   wing_pts = [
+    (rx1 + 300.0, ry1 + 210.0), (rx1 + 520.0, ry1 + 195.0),
+    (rx1 + 400.0, ry1 + 193.0), (rx1 + 335.0, ry1 + 196.0),
+    (rx1 + 395.0, ry1 + 145.0), (rx1 + 425.0, ry1 + 125.0),
+    (rx1 + 445.0, ry1 + 128.0), (rx1 + 385.0, ry1 + 85.0),
+   ]
+   wing_bbox = BBox(rx1 + 280.0, ry1 + 70.0, rx1 + 540.0, ry1 + 230.0)
+   test_wing = Wing(
+    points=[WingPoint(x, y, True) for x, y in wing_pts],
+    bbox=wing_bbox,
+    point_sources=["manual"] * 8,
+   )
+
+   created = split_image_regions(scan_path, regions[:2], rotation_mode="ccw90", wings=[test_wing])
+   self.assertEqual(len(created), 2)
+   for out_path, _ in created:
+    self.assertTrue(out_path.exists())
+
+   out0_path, out0_wings = created[0]
+   out1_path, out1_wings = created[1]
+   self.assertEqual(image_size(out0_path), (ch, cw))
+   with Image.open(out0_path) as out0_im:
+    out0_dpi = out0_im.info.get("dpi")
+    self.assertIsNotNone(out0_dpi)
+    self.assertAlmostEqual(float(out0_dpi[0]), 1200.0, delta=2.0)
+    self.assertAlmostEqual(float(out0_dpi[1]), 1200.0, delta=2.0)
+
+   self.assertEqual(len(out0_wings), 1)
+   self.assertEqual(len(out1_wings), 0)
+   tw = out0_wings[0]
+   for (ox, oy), pt in zip(wing_pts, tw.points):
+    self.assertAlmostEqual(pt.x, oy - ry1, places=5)
+    self.assertAlmostEqual(pt.y, float(cw) - (ox - rx1), places=5)
+   self.assertIsNotNone(tw.bbox)
+   self.assertAlmostEqual(tw.bbox.x1, wing_bbox.y1 - ry1, places=5)
+   self.assertAlmostEqual(tw.bbox.x2, wing_bbox.y2 - ry1, places=5)
+   self.assertAlmostEqual(tw.bbox.y1, float(cw) - (wing_bbox.x2 - rx1), places=5)
+   self.assertAlmostEqual(tw.bbox.y2, float(cw) - (wing_bbox.x1 - rx1), places=5)
+
+   # Исходник сохранен, повторный запуск уникализирует имена с суффиксом _2
+   self.assertTrue(scan_path.exists())
+   self.assertEqual(image_size(scan_path), (1200, 2200))
+   created_again = split_image_regions(scan_path, regions[:2], rotation_mode="ccw90")
+   self.assertEqual(len(created_again), 2)
+   self.assertNotEqual(created_again[0][0], out0_path)
+   self.assertNotEqual(created_again[1][0], out1_path)
+   self.assertTrue(created_again[0][0].stem.endswith("_2"))
+   self.assertTrue(created_again[1][0].stem.endswith("_2"))
+
+   # Досрочная остановка split_image_regions через should_stop возвращает [] и не создает файлов
+   stop_dir = Path(t) / "stopped_out"
+   stopped_created = split_image_regions(
+    scan_path,
+    regions[:2],
+    rotation_mode="ccw90",
+    output_dir=stop_dir,
+    should_stop=lambda: True,
+   )
+   self.assertEqual(stopped_created, [])
+   self.assertEqual(list(stop_dir.iterdir()) if stop_dir.exists() else [], [])
+
+ def test_split_mode_gui_workflow_and_proxy_display(self):
+  """Прокси-отображение read_pixmap_for_display и полный GUI-цикл режима Ножницы (EditMode.SPLIT)."""
+  from unittest.mock import patch
+  from PIL import Image
+  from PyQt5.QtCore import Qt
+  from neurowings.core.image_io import read_pixmap_for_display
+  from neurowings.core.image_split import split_image_regions
+  from neurowings.ui.main_window import MainWindow
+
+  with tempfile.TemporaryDirectory() as t:
+   img_p = Path(t) / "scan_gui.jpg"
+   Image.new("RGB", (600, 400), color=(245, 245, 245)).save(img_p)
+
+   # 1. Проверка прокси-режима read_pixmap_for_display
+   pm, orig_w, orig_h, sx, sy = read_pixmap_for_display(
+    img_p, max_display_side=200, megapixels_threshold=10000
+   )
+   self.assertFalse(pm.isNull())
+   self.assertEqual((orig_w, orig_h), (600, 400))
+   self.assertEqual(pm.width(), 200)
+   self.assertAlmostEqual(pm.height(), 133, delta=1)
+   self.assertAlmostEqual(sx, 3.0, delta=0.05)
+   self.assertAlmostEqual(sy, 3.0, delta=0.05)
+
+   # 2. GUI-сценарий режима EditMode.SPLIT в MainWindow
+   with patch.object(MainWindow, "_load_models"), patch.object(MainWindow, "_load_gpt_config"):
+    win = MainWindow()
+   try:
+    win._load_file_paths([img_p])
+    win.show()
+    app.processEvents()
+
+    win._set_edit_mode(EditMode.SPLIT)
+    app.processEvents()
+    self.assertTrue(win.split_bar.isVisible())
+    self.assertTrue(win.act_mode_split.isChecked())
+
+    win.spin_split_count.setValue(3)
+    win._apply_split_grid("horizontal")
+    self.assertEqual(len(win.split_regions), 3)
+    self.assertEqual(len(win.split_region_items), 3)
+    self.assertTrue(win.btn_split_apply.isEnabled())
+
+    win._on_split_region_delete(1)
+    self.assertEqual(len(win.split_regions), 2)
+    self.assertEqual(len(win.split_region_items), 2)
+
+    win._on_split_region_created(10.0, 140.0, 590.0, 260.0)
+    self.assertEqual(len(win.split_regions), 3)
+    self.assertEqual(len(win.split_region_items), 3)
+
+    # Помечаем исходник галочкой, чтобы убедиться, что _on_split_finished снимет ее
+    win.file_list.item(0).setCheckState(Qt.Checked)
+    created = split_image_regions(img_p, list(win.split_regions), rotation_mode="none")
+    self.assertEqual(len(created), 3)
+
+    win._on_split_finished(created)
+    app.processEvents()
+
+    self.assertEqual(win.file_list.count(), 4)
+    self.assertEqual(Path(win.file_list.item(0).data(Qt.UserRole)), img_p)
+    self.assertEqual(win.file_list.item(0).checkState(), Qt.Unchecked)
+
+    created_paths = [p for p, _ in created]
+    for i, expected_p in enumerate(created_paths, start=1):
+     it = win.file_list.item(i)
+     self.assertEqual(Path(it.data(Qt.UserRole)), expected_p)
+     self.assertEqual(it.checkState(), Qt.Checked)
+
+    self.assertEqual(win.edit_mode, EditMode.VIEW)
+    self.assertFalse(win.act_mode_split.isChecked())
+    self.assertFalse(win.split_bar.isVisible())
+    self.assertIsNotNone(win.current_image)
+    self.assertEqual(Path(win.current_image.path), created_paths[0])
+   finally:
+    win.close()
+
+ def test_bbox_recognition_calibrated_and_processing_guards(self):
+  """Калибровка точек в recognize_wing_in_bbox (point_sources='bbox'), гарды и сигналы SplitWorker."""
+  from types import SimpleNamespace
+  import numpy as np
+  from PIL import Image
+  from neurowings.core.constants import YOLO_TO_WINGSDIG
+  from neurowings.core.image_split import generate_grid_regions
+  from neurowings.workers.processing import ProcessingWorker
+  from neurowings.workers.split import SplitWorker
+
+  img_rgb = np.full((700, 1100, 3), 240, dtype=np.uint8)
+  bbox = BBox(100.0, 100.0, 900.0, 600.0)
+  wingsdig_pts = [
+   (161.0, 538.0), (810.0, 489.0), (430.0, 487.0), (244.0, 491.0),
+   (422.0, 368.0), (506.0, 323.0), (556.0, 328.0), (404.0, 197.0),
+  ]
+  yolo_global = [wingsdig_pts[YOLO_TO_WINGSDIG[i]] for i in range(8)]
+
+  def fake_model_pose(crops_arg, **kwargs):
+   crops = list(crops_arg) if isinstance(crops_arg, (list, tuple)) else [crops_arg]
+   out = []
+   for crop in crops:
+    ch, cw = crop.shape[:2]
+    margin_x = (cw - 800) / 2.0
+    margin_y = (ch - 500) / 2.0
+    x1m = 100.0 - margin_x
+    y1m = 100.0 - margin_y
+    local_xy = [[gx - x1m, gy - y1m] for gx, gy in yolo_global]
+    kp = SimpleNamespace(
+     xy=torch.tensor([local_xy], dtype=torch.float32),
+     conf=torch.tensor([[0.95] * 8], dtype=torch.float32),
+    )
+    out.append(SimpleNamespace(keypoints=kp))
+   return out
+
+  wing = ProcessingWorker.recognize_wing_in_bbox(img_rgb, bbox, fake_model_pose, device="cpu")
+  self.assertIsNotNone(wing)
+  self.assertEqual(wing.point_sources, ["bbox"] * 8)
+
+  expected_cal = ProcessingWorker._apply_kartashov_vein_axis_calibration(wingsdig_pts)
+  expected_snapped = [(float(round(x)), float(round(y))) for x, y in expected_cal]
+  self.assertEqual([(p.x, p.y) for p in wing.points], expected_snapped)
+  self.assertEqual(wing.get_active_points(), [(p.x, p.y) for p in wing.points])
+  self.assertNotEqual(wing.get_active_points(), [(p.x, p.y) for p in wing.points_yolo])
+  self.assertIsNotNone(wing.analysis)
+  self.assertTrue(wing.analysis.is_valid)
+
+  # Гарды recognize_wing_in_bbox
+  self.assertIsNone(ProcessingWorker.recognize_wing_in_bbox(img_rgb, bbox, model_pose=None))
+  self.assertIsNone(
+   ProcessingWorker.recognize_wing_in_bbox(np.zeros((0, 0, 3), dtype=np.uint8), bbox, fake_model_pose)
+  )
+
+  # Проверка сигналов progress и finished у SplitWorker (плюс stop-гард)
+  with tempfile.TemporaryDirectory() as t:
+   src = Path(t) / "worker_scan.jpg"
+   Image.new("RGB", (200, 200), color=(230, 230, 230)).save(src)
+   regs = generate_grid_regions(200, 200, 2, orientation="horizontal")
+
+   progress_events = []
+   finished_events = []
+   error_events = []
+
+   worker = SplitWorker(src, regs, rotation_mode="none")
+   worker.progress.connect(lambda idx, total, msg: progress_events.append((idx, total, msg)))
+   worker.finished.connect(lambda items: finished_events.append(items))
+   worker.error.connect(lambda msg: error_events.append(msg))
+   worker.run()
+
+   self.assertEqual(error_events, [])
+   self.assertEqual(len(progress_events), 2)
+   self.assertEqual([(e[0], e[1]) for e in progress_events], [(1, 2), (2, 2)])
+   self.assertEqual(len(finished_events), 1)
+   self.assertEqual(len(finished_events[0]), 2)
+   for out_p, _ in finished_events[0]:
+    self.assertTrue(Path(out_p).exists())
+
+   stopped_finished = []
+   worker_stopped = SplitWorker(src, regs, rotation_mode="none")
+   worker_stopped.finished.connect(lambda items: stopped_finished.append(items))
+   worker_stopped.stop()
+   worker_stopped.run()
+   self.assertEqual(stopped_finished, [[]])
 
 if __name__=='__main__':
  unittest.main()
