@@ -86,7 +86,7 @@ class Regression(unittest.TestCase):
    if name=='torch' or name.startswith('torch.'):raise ImportError('synthetic missing torch')
    return original(name,*args,**kwargs)
   namespace={'__name__':'models_without_torch'}
-  with patch('builtins.__import__',blocked):exec(((ROOT/'neurowings/core/models.py')).read_text(),namespace)
+  with patch('builtins.__import__',blocked):exec(((ROOT/'neurowings/core/models.py')).read_text(encoding='utf-8'),namespace)
   self.assertFalse(namespace['TORCH_AVAILABLE']);self.assertIsNone(namespace['get_device']())
  def test_invalid_geometry(self):
   valid=[(1161,2838),(1810,2789),(1430,2787),(1244,2791),(1422,2668),(1506,2623),(1556,2628),(1404,2497)]
