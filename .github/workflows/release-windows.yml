@@ -163,12 +163,20 @@ jobs:
       - name: Check version sync and build PyInstaller OneFile EXE
         shell: pwsh
         env:
+          PYTHONUTF8: '1'
           YOLO_OFFLINE: 'true'
           YOLO_AUTOINSTALL: 'false'
         run: |
           $ErrorActionPreference = 'Stop'
-          $ver = (python -c "import re; from pathlib import Path; m=re.search(r'APP_VERSION\s*=\s*\"([^\"]+)\"', Path('neurowings/core/constants.py').read_text(encoding='utf-8')); print(m.group(1))").Trim()
-          $nsiVer = (python -c "import re; from pathlib import Path; m=re.search(r'!define\s+PRODUCT_VERSION\s+\"([^\"]+)\"', Path('installer/installer.nsi').read_text(encoding='utf-8')); print(m.group(1))").Trim()
+          $constText = Get-Content -LiteralPath 'neurowings\core\constants.py' -Raw -Encoding UTF8
+          $nsiText = Get-Content -LiteralPath 'installer\installer.nsi' -Raw -Encoding UTF8
+          $mVer = [regex]::Match($constText, 'APP_VERSION\s*=\s*"([^"]+)"')
+          $mNsi = [regex]::Match($nsiText, '!define\s+PRODUCT_VERSION\s+"([^"]+)"')
+          if (-not $mVer.Success -or -not $mNsi.Success) {
+            throw "Failed to parse APP_VERSION or PRODUCT_VERSION"
+          }
+          $ver = $mVer.Groups[1].Value.Trim()
+          $nsiVer = $mNsi.Groups[1].Value.Trim()
           if ($ver -ne $nsiVer) {
             throw "Version mismatch: constants.py=$ver vs installer.nsi=$nsiVer"
           }
@@ -201,17 +209,24 @@ jobs:
           Write-Host "Built $targetName ($sizeBytes bytes), SHA256=$sha"
 
           # Verify all 5 models are embedded inside OneFile CArchive
-          python -c "
+          @'
           import json
+          import sys
           from pathlib import Path
           from PyInstaller.archive.readers import CArchiveReader
-          manifest = json.loads(Path('neurowings/core/model_manifest.json').read_text(encoding='utf-8'))
-          reader = CArchiveReader(r'$targetExe')
-          names = {Path(str(k).replace('\\\\', '/')).name for k in reader.toc.keys()}
+
+          exe_path = sys.argv[1]
+          manifest = json.loads(Path("neurowings/core/model_manifest.json").read_text(encoding="utf-8"))
+          reader = CArchiveReader(exe_path)
+          names = {Path(str(k).replace("\\", "/")).name for k in reader.toc.keys()}
           missing = [m for m in manifest if m not in names]
-          assert not missing, f'Models missing in EXE: {missing}'
-          print('CArchive verification OK: all 5 models embedded.')
-          "
+          if missing:
+              raise SystemExit(f"Models missing in EXE: {missing}")
+          print("CArchive verification OK: all 5 models embedded.")
+          '@ | Set-Content -Path _verify_exe.py -Encoding UTF8
+          python _verify_exe.py $targetExe
+          if ($LASTEXITCODE -ne 0) { throw "CArchive verification failed" }
+          Remove-Item -Force _verify_exe.py
 
       - name: Smoke test built OneFile EXE on native Windows (CLI + GUI)
         shell: pwsh
